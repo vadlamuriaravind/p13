@@ -14,49 +14,61 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.spark.examples.ml;
+package org.apache.spark.examples.mllib;
 
 // $example on$
 
-import org.apache.spark.ml.regression.IsotonicRegression;
-import org.apache.spark.ml.regression.IsotonicRegressionModel;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
+import scala.Tuple2;
+import scala.Tuple3;
+import org.apache.spark.api.java.JavaPairRDD;
+import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.mllib.regression.IsotonicRegression;
+import org.apache.spark.mllib.regression.IsotonicRegressionModel;
+import org.apache.spark.mllib.regression.LabeledPoint;
+import org.apache.spark.mllib.util.MLUtils;
 // $example off$
-import org.apache.spark.sql.SparkSession;
+import org.apache.spark.SparkConf;
 
-/**
- * An example demonstrating IsotonicRegression.
- * Run with
- * <pre>
- * bin/run-example ml.JavaIsotonicRegressionExample
- * </pre>
- */
 public class JavaIsotonicRegressionExample {
-
   public static void main(String[] args) {
-    // Create a SparkSession.
-    SparkSession spark = SparkSession
-      .builder()
-      .appName("JavaIsotonicRegressionExample")
-      .getOrCreate();
-
+    SparkConf sparkConf = new SparkConf().setAppName("JavaIsotonicRegressionExample");
+    JavaSparkContext jsc = new JavaSparkContext(sparkConf);
     // $example on$
-    // Loads data.
-    Dataset<Row> dataset = spark.read().format("libsvm")
-      .load("data/mllib/sample_isotonic_regression_libsvm_data.txt");
+    JavaRDD<LabeledPoint> data = MLUtils.loadLibSVMFile(
+      jsc.sc(), "data/mllib/sample_isotonic_regression_libsvm_data.txt").toJavaRDD();
 
-    // Trains an isotonic regression model.
-    IsotonicRegression ir = new IsotonicRegression();
-    IsotonicRegressionModel model = ir.fit(dataset);
+    // Create label, feature, weight tuples from input data with weight set to default value 1.0.
+    JavaRDD<Tuple3<Double, Double, Double>> parsedData = data.map(point ->
+      new Tuple3<>(point.label(), point.features().apply(0), 1.0));
 
-    System.out.println("Boundaries in increasing order: " + model.boundaries() + "\n");
-    System.out.println("Predictions associated with the boundaries: " + model.predictions() + "\n");
+    // Split data into training (60%) and test (40%) sets.
+    JavaRDD<Tuple3<Double, Double, Double>>[] splits =
+      parsedData.randomSplit(new double[]{0.6, 0.4}, 11L);
+    JavaRDD<Tuple3<Double, Double, Double>> training = splits[0];
+    JavaRDD<Tuple3<Double, Double, Double>> test = splits[1];
 
-    // Makes predictions.
-    model.transform(dataset).show();
+    // Create isotonic regression model from training data.
+    // Isotonic parameter defaults to true so it is only shown for demonstration
+    IsotonicRegressionModel model = new IsotonicRegression().setIsotonic(true).run(training);
+
+    // Create tuples of predicted and real labels.
+    JavaPairRDD<Double, Double> predictionAndLabel = test.mapToPair(point ->
+      new Tuple2<>(model.predict(point._2()), point._1()));
+
+    // Calculate mean squared error between predicted and real labels.
+    double meanSquaredError = predictionAndLabel.mapToDouble(pl -> {
+      double diff = pl._1() - pl._2();
+      return diff * diff;
+    }).mean();
+    System.out.println("Mean Squared Error = " + meanSquaredError);
+
+    // Save and load model
+    model.save(jsc.sc(), "target/tmp/myIsotonicRegressionModel");
+    IsotonicRegressionModel sameModel =
+      IsotonicRegressionModel.load(jsc.sc(), "target/tmp/myIsotonicRegressionModel");
     // $example off$
 
-    spark.stop();
+    jsc.stop();
   }
 }

@@ -20,35 +20,41 @@ package org.apache.spark.examples.mllib;
 // $example on$
 import java.util.Arrays;
 import java.util.List;
-// $example off$
+
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
-// $example on$
-import org.apache.spark.mllib.fpm.PrefixSpan;
-import org.apache.spark.mllib.fpm.PrefixSpanModel;
+import org.apache.spark.mllib.fpm.AssociationRules;
+import org.apache.spark.mllib.fpm.FPGrowth;
+import org.apache.spark.mllib.fpm.FPGrowthModel;
 // $example off$
+
 import org.apache.spark.SparkConf;
 
-public class JavaPrefixSpanExample {
+public class JavaSimpleFPGrowth {
 
   public static void main(String[] args) {
-
-    SparkConf sparkConf = new SparkConf().setAppName("JavaPrefixSpanExample");
-    JavaSparkContext sc = new JavaSparkContext(sparkConf);
+    SparkConf conf = new SparkConf().setAppName("FP-growth Example");
+    JavaSparkContext sc = new JavaSparkContext(conf);
 
     // $example on$
-    JavaRDD<List<List<Integer>>> sequences = sc.parallelize(Arrays.asList(
-      Arrays.asList(Arrays.asList(1, 2), Arrays.asList(3)),
-      Arrays.asList(Arrays.asList(1), Arrays.asList(3, 2), Arrays.asList(1, 2)),
-      Arrays.asList(Arrays.asList(1, 2), Arrays.asList(5)),
-      Arrays.asList(Arrays.asList(6))
-    ), 2);
-    PrefixSpan prefixSpan = new PrefixSpan()
-      .setMinSupport(0.5)
-      .setMaxPatternLength(5);
-    PrefixSpanModel<Integer> model = prefixSpan.run(sequences);
-    for (PrefixSpan.FreqSequence<Integer> freqSeq: model.freqSequences().toJavaRDD().collect()) {
-      System.out.println(freqSeq.javaSequence() + ", " + freqSeq.freq());
+    JavaRDD<String> data = sc.textFile("data/mllib/sample_fpgrowth.txt");
+
+    JavaRDD<List<String>> transactions = data.map(line -> Arrays.asList(line.split(" ")));
+
+    FPGrowth fpg = new FPGrowth()
+      .setMinSupport(0.2)
+      .setNumPartitions(10);
+    FPGrowthModel<String> model = fpg.run(transactions);
+
+    for (FPGrowth.FreqItemset<String> itemset: model.freqItemsets().toJavaRDD().collect()) {
+      System.out.println("[" + itemset.javaItems() + "], " + itemset.freq());
+    }
+
+    double minConfidence = 0.8;
+    for (AssociationRules.Rule<String> rule
+      : model.generateAssociationRules(minConfidence).toJavaRDD().collect()) {
+      System.out.println(
+        rule.javaAntecedent() + " => " + rule.javaConsequent() + ", " + rule.confidence());
     }
     // $example off$
 

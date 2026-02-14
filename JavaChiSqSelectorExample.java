@@ -15,60 +15,51 @@
  * limitations under the License.
  */
 
-package org.apache.spark.examples.ml;
+package org.apache.spark.examples.mllib;
 
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.SparkSession;
-
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaSparkContext;
 // $example on$
-import java.util.Arrays;
-import java.util.List;
-
-import org.apache.spark.ml.feature.ChiSqSelector;
-import org.apache.spark.ml.linalg.VectorUDT;
-import org.apache.spark.ml.linalg.Vectors;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.RowFactory;
-import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.Metadata;
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.mllib.feature.ChiSqSelector;
+import org.apache.spark.mllib.feature.ChiSqSelectorModel;
+import org.apache.spark.mllib.linalg.Vectors;
+import org.apache.spark.mllib.regression.LabeledPoint;
+import org.apache.spark.mllib.util.MLUtils;
 // $example off$
 
 public class JavaChiSqSelectorExample {
   public static void main(String[] args) {
-    SparkSession spark = SparkSession
-      .builder()
-      .appName("JavaChiSqSelectorExample")
-      .getOrCreate();
+
+    SparkConf conf = new SparkConf().setAppName("JavaChiSqSelectorExample");
+    JavaSparkContext jsc = new JavaSparkContext(conf);
 
     // $example on$
-    List<Row> data = Arrays.asList(
-      RowFactory.create(7, Vectors.dense(0.0, 0.0, 18.0, 1.0), 1.0),
-      RowFactory.create(8, Vectors.dense(0.0, 1.0, 12.0, 0.0), 0.0),
-      RowFactory.create(9, Vectors.dense(1.0, 0.0, 15.0, 0.1), 0.0)
-    );
-    StructType schema = new StructType(new StructField[]{
-      new StructField("id", DataTypes.IntegerType, false, Metadata.empty()),
-      new StructField("features", new VectorUDT(), false, Metadata.empty()),
-      new StructField("clicked", DataTypes.DoubleType, false, Metadata.empty())
+    JavaRDD<LabeledPoint> points = MLUtils.loadLibSVMFile(jsc.sc(),
+      "data/mllib/sample_libsvm_data.txt").toJavaRDD().cache();
+
+    // Discretize data in 16 equal bins since ChiSqSelector requires categorical features
+    // Although features are doubles, the ChiSqSelector treats each unique value as a category
+    JavaRDD<LabeledPoint> discretizedData = points.map(lp -> {
+      double[] discretizedFeatures = new double[lp.features().size()];
+      for (int i = 0; i < lp.features().size(); ++i) {
+        discretizedFeatures[i] = Math.floor(lp.features().apply(i) / 16);
+      }
+      return new LabeledPoint(lp.label(), Vectors.dense(discretizedFeatures));
     });
 
-    Dataset<Row> df = spark.createDataFrame(data, schema);
-
-    ChiSqSelector selector = new ChiSqSelector()
-      .setNumTopFeatures(1)
-      .setFeaturesCol("features")
-      .setLabelCol("clicked")
-      .setOutputCol("selectedFeatures");
-
-    Dataset<Row> result = selector.fit(df).transform(df);
-
-    System.out.println("ChiSqSelector output with top " + selector.getNumTopFeatures()
-        + " features selected");
-    result.show();
-
+    // Create ChiSqSelector that will select top 50 of 692 features
+    ChiSqSelector selector = new ChiSqSelector(50);
+    // Create ChiSqSelector model (selecting features)
+    ChiSqSelectorModel transformer = selector.fit(discretizedData.rdd());
+    // Filter the top 50 features from each feature vector
+    JavaRDD<LabeledPoint> filteredData = discretizedData.map(lp ->
+      new LabeledPoint(lp.label(), transformer.transform(lp.features())));
     // $example off$
-    spark.stop();
+
+    System.out.println("filtered data: ");
+    filteredData.foreach(System.out::println);
+
+    jsc.stop();
   }
 }

@@ -28,17 +28,18 @@ import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.mllib.linalg.Matrix;
+import org.apache.spark.mllib.linalg.SingularValueDecomposition;
 import org.apache.spark.mllib.linalg.Vector;
 import org.apache.spark.mllib.linalg.Vectors;
 import org.apache.spark.mllib.linalg.distributed.RowMatrix;
 // $example off$
 
 /**
- * Example for compute principal components on a 'RowMatrix'.
+ * Example for SingularValueDecomposition.
  */
-public class JavaPCAExample {
+public class JavaSVDExample {
   public static void main(String[] args) {
-    SparkConf conf = new SparkConf().setAppName("PCA Example");
+    SparkConf conf = new SparkConf().setAppName("SVD Example");
     SparkContext sc = new SparkContext(conf);
     JavaSparkContext jsc = JavaSparkContext.fromSparkContext(sc);
 
@@ -54,18 +55,20 @@ public class JavaPCAExample {
     // Create a RowMatrix from JavaRDD<Vector>.
     RowMatrix mat = new RowMatrix(rows.rdd());
 
-    // Compute the top 4 principal components.
-    // Principal components are stored in a local dense matrix.
-    Matrix pc = mat.computePrincipalComponents(4);
-
-    // Project the rows to the linear space spanned by the top 4 principal components.
-    RowMatrix projected = mat.multiply(pc);
+    // Compute the top 5 singular values and corresponding singular vectors.
+    SingularValueDecomposition<RowMatrix, Matrix> svd = mat.computeSVD(5, true, 1.0E-9d);
+    RowMatrix U = svd.U();  // The U factor is a RowMatrix.
+    Vector s = svd.s();     // The singular values are stored in a local dense vector.
+    Matrix V = svd.V();     // The V factor is a local dense matrix.
     // $example off$
-    Vector[] collectPartitions = (Vector[])projected.rows().collect();
-    System.out.println("Projected vector of principal component:");
+    Vector[] collectPartitions = (Vector[]) U.rows().collect();
+    System.out.println("U factor is:");
     for (Vector vector : collectPartitions) {
       System.out.println("\t" + vector);
     }
+    System.out.println("Singular values are: " + s);
+    System.out.println("V factor is:\n" + V);
+
     jsc.stop();
   }
 }

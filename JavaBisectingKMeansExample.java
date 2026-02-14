@@ -15,59 +15,52 @@
  * limitations under the License.
  */
 
-package org.apache.spark.examples.ml;
+package org.apache.spark.examples.mllib;
 
 // $example on$
-import org.apache.spark.ml.clustering.BisectingKMeans;
-import org.apache.spark.ml.clustering.BisectingKMeansModel;
-import org.apache.spark.ml.evaluation.ClusteringEvaluator;
-import org.apache.spark.ml.linalg.Vector;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
+import java.util.Arrays;
+import java.util.List;
 // $example off$
-import org.apache.spark.sql.SparkSession;
-
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaSparkContext;
+// $example on$
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.mllib.clustering.BisectingKMeans;
+import org.apache.spark.mllib.clustering.BisectingKMeansModel;
+import org.apache.spark.mllib.linalg.Vector;
+import org.apache.spark.mllib.linalg.Vectors;
+// $example off$
 
 /**
- * An example demonstrating bisecting k-means clustering.
- * Run with
- * <pre>
- * bin/run-example ml.JavaBisectingKMeansExample
- * </pre>
+ * Java example for bisecting k-means clustering.
  */
 public class JavaBisectingKMeansExample {
-
   public static void main(String[] args) {
-    SparkSession spark = SparkSession
-      .builder()
-      .appName("JavaBisectingKMeansExample")
-      .getOrCreate();
+    SparkConf sparkConf = new SparkConf().setAppName("JavaBisectingKMeansExample");
+    JavaSparkContext sc = new JavaSparkContext(sparkConf);
 
     // $example on$
-    // Loads data.
-    Dataset<Row> dataset = spark.read().format("libsvm").load("data/mllib/sample_kmeans_data.txt");
+    List<Vector> localData = Arrays.asList(
+      Vectors.dense(0.1, 0.1),   Vectors.dense(0.3, 0.3),
+      Vectors.dense(10.1, 10.1), Vectors.dense(10.3, 10.3),
+      Vectors.dense(20.1, 20.1), Vectors.dense(20.3, 20.3),
+      Vectors.dense(30.1, 30.1), Vectors.dense(30.3, 30.3)
+    );
+    JavaRDD<Vector> data = sc.parallelize(localData, 2);
 
-    // Trains a bisecting k-means model.
-    BisectingKMeans bkm = new BisectingKMeans().setK(2).setSeed(1);
-    BisectingKMeansModel model = bkm.fit(dataset);
+    BisectingKMeans bkm = new BisectingKMeans()
+      .setK(4);
+    BisectingKMeansModel model = bkm.run(data);
 
-    // Make predictions
-    Dataset<Row> predictions = model.transform(dataset);
+    System.out.println("Compute Cost: " + model.computeCost(data));
 
-    // Evaluate clustering by computing Silhouette score
-    ClusteringEvaluator evaluator = new ClusteringEvaluator();
-
-    double silhouette = evaluator.evaluate(predictions);
-    System.out.println("Silhouette with squared euclidean distance = " + silhouette);
-
-    // Shows the result.
-    System.out.println("Cluster Centers: ");
-    Vector[] centers = model.clusterCenters();
-    for (Vector center : centers) {
-      System.out.println(center);
+    Vector[] clusterCenters = model.clusterCenters();
+    for (int i = 0; i < clusterCenters.length; i++) {
+      Vector clusterCenter = clusterCenters[i];
+      System.out.println("Cluster Center " + i + ": " + clusterCenter);
     }
     // $example off$
 
-    spark.stop();
+    sc.stop();
   }
 }

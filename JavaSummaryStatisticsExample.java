@@ -17,42 +17,39 @@
 
 package org.apache.spark.examples.mllib;
 
-// $example on$
-import java.util.Arrays;
-// $example off$
-
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaSparkContext;
 // $example on$
+import java.util.Arrays;
+
 import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.mllib.feature.ElementwiseProduct;
 import org.apache.spark.mllib.linalg.Vector;
 import org.apache.spark.mllib.linalg.Vectors;
+import org.apache.spark.mllib.stat.MultivariateStatisticalSummary;
+import org.apache.spark.mllib.stat.Statistics;
 // $example off$
 
-public class JavaElementwiseProductExample {
+public class JavaSummaryStatisticsExample {
   public static void main(String[] args) {
 
-    SparkConf conf = new SparkConf().setAppName("JavaElementwiseProductExample");
+    SparkConf conf = new SparkConf().setAppName("JavaSummaryStatisticsExample");
     JavaSparkContext jsc = new JavaSparkContext(conf);
 
     // $example on$
-    // Create some vector data; also works for sparse vectors
-    JavaRDD<Vector> data = jsc.parallelize(Arrays.asList(
-      Vectors.dense(1.0, 2.0, 3.0), Vectors.dense(4.0, 5.0, 6.0)));
-    Vector transformingVector = Vectors.dense(0.0, 1.0, 2.0);
-    ElementwiseProduct transformer = new ElementwiseProduct(transformingVector);
+    JavaRDD<Vector> mat = jsc.parallelize(
+      Arrays.asList(
+        Vectors.dense(1.0, 10.0, 100.0),
+        Vectors.dense(2.0, 20.0, 200.0),
+        Vectors.dense(3.0, 30.0, 300.0)
+      )
+    ); // an RDD of Vectors
 
-    // Batch transform and per-row transform give the same results:
-    JavaRDD<Vector> transformedData = transformer.transform(data);
-    JavaRDD<Vector> transformedData2 = data.map(transformer::transform);
+    // Compute column summary statistics.
+    MultivariateStatisticalSummary summary = Statistics.colStats(mat.rdd());
+    System.out.println(summary.mean());  // a dense vector containing the mean value for each column
+    System.out.println(summary.variance());  // column-wise variance
+    System.out.println(summary.numNonzeros());  // number of nonzeros in each column
     // $example off$
-
-    System.out.println("transformedData: ");
-    transformedData.foreach(System.out::println);
-
-    System.out.println("transformedData2: ");
-    transformedData2.foreach(System.out::println);
 
     jsc.stop();
   }

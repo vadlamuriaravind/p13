@@ -23,24 +23,21 @@ import java.util.Map;
 
 import scala.Tuple2;
 
-import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.mllib.regression.LabeledPoint;
-import org.apache.spark.mllib.tree.DecisionTree;
-import org.apache.spark.mllib.tree.model.DecisionTreeModel;
+import org.apache.spark.mllib.tree.RandomForest;
+import org.apache.spark.mllib.tree.model.RandomForestModel;
 import org.apache.spark.mllib.util.MLUtils;
+import org.apache.spark.SparkConf;
 // $example off$
 
-class JavaDecisionTreeClassificationExample {
-
+public class JavaRandomForestRegressionExample {
   public static void main(String[] args) {
-
     // $example on$
-    SparkConf sparkConf = new SparkConf().setAppName("JavaDecisionTreeClassificationExample");
+    SparkConf sparkConf = new SparkConf().setAppName("JavaRandomForestRegressionExample");
     JavaSparkContext jsc = new JavaSparkContext(sparkConf);
-
     // Load and parse the data file.
     String datapath = "data/mllib/sample_libsvm_data.txt";
     JavaRDD<LabeledPoint> data = MLUtils.loadLibSVMFile(jsc.sc(), datapath).toJavaRDD();
@@ -50,30 +47,34 @@ class JavaDecisionTreeClassificationExample {
     JavaRDD<LabeledPoint> testData = splits[1];
 
     // Set parameters.
-    //  Empty categoricalFeaturesInfo indicates all features are continuous.
-    int numClasses = 2;
+    // Empty categoricalFeaturesInfo indicates all features are continuous.
     Map<Integer, Integer> categoricalFeaturesInfo = new HashMap<>();
-    String impurity = "gini";
-    int maxDepth = 5;
+    int numTrees = 3; // Use more in practice.
+    String featureSubsetStrategy = "auto"; // Let the algorithm choose.
+    String impurity = "variance";
+    int maxDepth = 4;
     int maxBins = 32;
-
-    // Train a DecisionTree model for classification.
-    DecisionTreeModel model = DecisionTree.trainClassifier(trainingData, numClasses,
-      categoricalFeaturesInfo, impurity, maxDepth, maxBins);
+    int seed = 12345;
+    // Train a RandomForest model.
+    RandomForestModel model = RandomForest.trainRegressor(trainingData,
+      categoricalFeaturesInfo, numTrees, featureSubsetStrategy, impurity, maxDepth, maxBins, seed);
 
     // Evaluate model on test instances and compute test error
     JavaPairRDD<Double, Double> predictionAndLabel =
       testData.mapToPair(p -> new Tuple2<>(model.predict(p.features()), p.label()));
-    double testErr =
-      predictionAndLabel.filter(pl -> !pl._1().equals(pl._2())).count() / (double) testData.count();
-
-    System.out.println("Test Error: " + testErr);
-    System.out.println("Learned classification tree model:\n" + model.toDebugString());
+    double testMSE = predictionAndLabel.mapToDouble(pl -> {
+      double diff = pl._1() - pl._2();
+      return diff * diff;
+    }).mean();
+    System.out.println("Test Mean Squared Error: " + testMSE);
+    System.out.println("Learned regression forest model:\n" + model.toDebugString());
 
     // Save and load model
-    model.save(jsc.sc(), "target/tmp/myDecisionTreeClassificationModel");
-    DecisionTreeModel sameModel = DecisionTreeModel
-      .load(jsc.sc(), "target/tmp/myDecisionTreeClassificationModel");
+    model.save(jsc.sc(), "target/tmp/myRandomForestRegressionModel");
+    RandomForestModel sameModel = RandomForestModel.load(jsc.sc(),
+      "target/tmp/myRandomForestRegressionModel");
     // $example off$
+
+    jsc.stop();
   }
 }

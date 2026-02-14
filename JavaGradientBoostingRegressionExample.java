@@ -28,19 +28,18 @@ import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.mllib.regression.LabeledPoint;
-import org.apache.spark.mllib.tree.DecisionTree;
-import org.apache.spark.mllib.tree.model.DecisionTreeModel;
+import org.apache.spark.mllib.tree.GradientBoostedTrees;
+import org.apache.spark.mllib.tree.configuration.BoostingStrategy;
+import org.apache.spark.mllib.tree.model.GradientBoostedTreesModel;
 import org.apache.spark.mllib.util.MLUtils;
 // $example off$
 
-class JavaDecisionTreeClassificationExample {
-
+public class JavaGradientBoostingRegressionExample {
   public static void main(String[] args) {
-
     // $example on$
-    SparkConf sparkConf = new SparkConf().setAppName("JavaDecisionTreeClassificationExample");
+    SparkConf sparkConf = new SparkConf()
+      .setAppName("JavaGradientBoostedTreesRegressionExample");
     JavaSparkContext jsc = new JavaSparkContext(sparkConf);
-
     // Load and parse the data file.
     String datapath = "data/mllib/sample_libsvm_data.txt";
     JavaRDD<LabeledPoint> data = MLUtils.loadLibSVMFile(jsc.sc(), datapath).toJavaRDD();
@@ -49,31 +48,33 @@ class JavaDecisionTreeClassificationExample {
     JavaRDD<LabeledPoint> trainingData = splits[0];
     JavaRDD<LabeledPoint> testData = splits[1];
 
-    // Set parameters.
-    //  Empty categoricalFeaturesInfo indicates all features are continuous.
-    int numClasses = 2;
+    // Train a GradientBoostedTrees model.
+    // The defaultParams for Regression use SquaredError by default.
+    BoostingStrategy boostingStrategy = BoostingStrategy.defaultParams("Regression");
+    boostingStrategy.setNumIterations(3); // Note: Use more iterations in practice.
+    boostingStrategy.getTreeStrategy().setMaxDepth(5);
+    // Empty categoricalFeaturesInfo indicates all features are continuous.
     Map<Integer, Integer> categoricalFeaturesInfo = new HashMap<>();
-    String impurity = "gini";
-    int maxDepth = 5;
-    int maxBins = 32;
+    boostingStrategy.treeStrategy().setCategoricalFeaturesInfo(categoricalFeaturesInfo);
 
-    // Train a DecisionTree model for classification.
-    DecisionTreeModel model = DecisionTree.trainClassifier(trainingData, numClasses,
-      categoricalFeaturesInfo, impurity, maxDepth, maxBins);
+    GradientBoostedTreesModel model = GradientBoostedTrees.train(trainingData, boostingStrategy);
 
     // Evaluate model on test instances and compute test error
     JavaPairRDD<Double, Double> predictionAndLabel =
       testData.mapToPair(p -> new Tuple2<>(model.predict(p.features()), p.label()));
-    double testErr =
-      predictionAndLabel.filter(pl -> !pl._1().equals(pl._2())).count() / (double) testData.count();
-
-    System.out.println("Test Error: " + testErr);
-    System.out.println("Learned classification tree model:\n" + model.toDebugString());
+    double testMSE = predictionAndLabel.mapToDouble(pl -> {
+      double diff = pl._1() - pl._2();
+      return diff * diff;
+    }).mean();
+    System.out.println("Test Mean Squared Error: " + testMSE);
+    System.out.println("Learned regression GBT model:\n" + model.toDebugString());
 
     // Save and load model
-    model.save(jsc.sc(), "target/tmp/myDecisionTreeClassificationModel");
-    DecisionTreeModel sameModel = DecisionTreeModel
-      .load(jsc.sc(), "target/tmp/myDecisionTreeClassificationModel");
+    model.save(jsc.sc(), "target/tmp/myGradientBoostingRegressionModel");
+    GradientBoostedTreesModel sameModel = GradientBoostedTreesModel.load(jsc.sc(),
+      "target/tmp/myGradientBoostingRegressionModel");
     // $example off$
+
+    jsc.stop();
   }
 }
