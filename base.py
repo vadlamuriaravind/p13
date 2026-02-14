@@ -15,400 +15,491 @@
 # limitations under the License.
 #
 
-from abc import ABCMeta, abstractmethod
+import numbers
+from abc import ABCMeta
+from itertools import chain
+from typing import Any, Optional, Union
 
-import copy
-import threading
+import numpy as np
+import pandas as pd
+from pandas.api.types import CategoricalDtype
 
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Iterator,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-    TypeVar,
-    Union,
-    cast,
-    overload,
-    TYPE_CHECKING,
+from pyspark.sql import functions as F, Column
+from pyspark.sql.types import (
+    ArrayType,
+    BinaryType,
+    BooleanType,
+    DataType,
+    DateType,
+    DayTimeIntervalType,
+    DecimalType,
+    FractionalType,
+    IntegralType,
+    MapType,
+    NullType,
+    NumericType,
+    StringType,
+    StructType,
+    TimestampType,
+    TimestampNTZType,
+    UserDefinedType,
+)
+from pyspark.pandas._typing import Dtype, IndexOpsLike, SeriesOrIndex
+from pyspark.pandas.typedef import extension_dtypes
+from pyspark.pandas.typedef.typehints import (
+    extension_dtypes_available,
+    extension_float_dtypes_available,
+    extension_object_dtypes_available,
+    spark_type_to_pandas_dtype,
 )
 
-from pyspark import since
-from pyspark.ml.param import P
-from pyspark.ml.common import inherit_doc
-from pyspark.ml.param.shared import (
-    HasInputCol,
-    HasOutputCol,
-    HasLabelCol,
-    HasFeaturesCol,
-    HasPredictionCol,
-    Params,
-)
-from pyspark.sql.dataframe import DataFrame
-from pyspark.sql.functions import udf
-from pyspark.sql.types import DataType, StructField, StructType
+if extension_dtypes_available:
+    from pandas import Int8Dtype, Int16Dtype, Int32Dtype, Int64Dtype
 
-if TYPE_CHECKING:
-    from pyspark.ml._typing import ParamMap
+if extension_float_dtypes_available:
+    from pandas import Float32Dtype, Float64Dtype
 
-T = TypeVar("T")
-M = TypeVar("M", bound="Transformer")
+if extension_object_dtypes_available:
+    from pandas import BooleanDtype, StringDtype
 
 
-class _FitMultipleIterator(Generic[M]):
-    """
-    Used by default implementation of Estimator.fitMultiple to produce models in a thread safe
-    iterator. This class handles the simple case of fitMultiple where each param map should be
-    fit independently.
+def is_valid_operand_for_numeric_arithmetic(operand: Any, *, allow_bool: bool = True) -> bool:
+    """Check whether the `operand` is valid for arithmetic operations against numerics."""
+    from pyspark.pandas.base import IndexOpsMixin
 
-    Parameters
-    ----------
-    fitSingleModel : function
-        Callable[[int], Transformer] which fits an estimator to a dataset.
-        `fitSingleModel` may be called up to `numModels` times, with a unique index each time.
-        Each call to `fitSingleModel` with an index should return the Model associated with
-        that index.
-    numModel : int
-        Number of models this iterator should produce.
-
-    Notes
-    -----
-    See :py:meth:`Estimator.fitMultiple` for more info.
-    """
-
-    def __init__(self, fitSingleModel: Callable[[int], M], numModels: int):
-        """ """
-        self.fitSingleModel = fitSingleModel
-        self.numModel = numModels
-        self.counter = 0
-        self.lock = threading.Lock()
-
-    def __iter__(self) -> Iterator[Tuple[int, M]]:
-        return self
-
-    def __next__(self) -> Tuple[int, M]:
-        with self.lock:
-            index = self.counter
-            if index >= self.numModel:
-                raise StopIteration("No models remaining.")
-            self.counter += 1
-        return index, self.fitSingleModel(index)
-
-    def next(self) -> Tuple[int, M]:
-        """For python2 compatibility."""
-        return self.__next__()
-
-
-@inherit_doc
-class Estimator(Params, Generic[M], metaclass=ABCMeta):
-    """
-    Abstract class for estimators that fit models to data.
-
-    .. versionadded:: 1.3.0
-    """
-
-    @abstractmethod
-    def _fit(self, dataset: DataFrame) -> M:
-        """
-        Fits a model to the input dataset. This is called by the default implementation of fit.
-
-
-        Parameters
-        ----------
-        dataset : :py:class:`pyspark.sql.DataFrame`
-            input dataset
-
-        Returns
-        -------
-        :class:`Transformer`
-            fitted model
-        """
-        raise NotImplementedError()
-
-    def fitMultiple(
-        self, dataset: DataFrame, paramMaps: Sequence["ParamMap"]
-    ) -> Iterator[Tuple[int, M]]:
-        """
-        Fits a model to the input dataset for each param map in `paramMaps`.
-
-        .. versionadded:: 2.3.0
-
-        Parameters
-        ----------
-        dataset : :py:class:`pyspark.sql.DataFrame`
-            input dataset.
-        paramMaps : :py:class:`collections.abc.Sequence`
-            A Sequence of param maps.
-
-        Returns
-        -------
-        :py:class:`_FitMultipleIterator`
-            A thread safe iterable which contains one model for each param map. Each
-            call to `next(modelIterator)` will return `(index, model)` where model was fit
-            using `paramMaps[index]`. `index` values may not be sequential.
-        """
-        estimator = self.copy()
-
-        def fitSingleModel(index: int) -> M:
-            return estimator.fit(dataset, paramMaps[index])
-
-        return _FitMultipleIterator(fitSingleModel, len(paramMaps))
-
-    @overload
-    def fit(self, dataset: DataFrame, params: Optional["ParamMap"] = ...) -> M:
-        ...
-
-    @overload
-    def fit(
-        self, dataset: DataFrame, params: Union[List["ParamMap"], Tuple["ParamMap"]]
-    ) -> List[M]:
-        ...
-
-    def fit(
-        self,
-        dataset: DataFrame,
-        params: Optional[Union["ParamMap", List["ParamMap"], Tuple["ParamMap"]]] = None,
-    ) -> Union[M, List[M]]:
-        """
-        Fits a model to the input dataset with optional parameters.
-
-        .. versionadded:: 1.3.0
-
-        Parameters
-        ----------
-        dataset : :py:class:`pyspark.sql.DataFrame`
-            input dataset.
-        params : dict or list or tuple, optional
-            an optional param map that overrides embedded params. If a list/tuple of
-            param maps is given, this calls fit on each param map and returns a list of
-            models.
-
-        Returns
-        -------
-        :py:class:`Transformer` or a list of :py:class:`Transformer`
-            fitted model(s)
-        """
-        if params is None:
-            params = dict()
-        if isinstance(params, (list, tuple)):
-            models: List[Optional[M]] = [None] * len(params)
-            for index, model in self.fitMultiple(dataset, params):
-                models[index] = model
-            return cast(List[M], models)
-        elif isinstance(params, dict):
-            if params:
-                return self.copy(params)._fit(dataset)
-            else:
-                return self._fit(dataset)
+    if isinstance(operand, numbers.Number):
+        return not isinstance(operand, bool) or allow_bool
+    elif isinstance(operand, IndexOpsMixin):
+        if isinstance(operand.dtype, CategoricalDtype):
+            return False
         else:
-            raise TypeError(
-                "Params must be either a param map or a list/tuple of param maps, "
-                "but got %s." % type(params)
+            return isinstance(operand.spark.data_type, NumericType) or (
+                allow_bool and isinstance(operand.spark.data_type, BooleanType)
             )
+    else:
+        return False
 
 
-@inherit_doc
-class Transformer(Params, metaclass=ABCMeta):
+def transform_boolean_operand_to_numeric(
+    operand: Any, *, spark_type: Optional[DataType] = None
+) -> Any:
+    """Transform boolean operand to numeric.
+
+    If the `operand` is:
+        - a boolean IndexOpsMixin, transform the `operand` to the `spark_type`.
+        - a boolean literal, transform to the int value.
+    Otherwise, return the operand as it is.
     """
-    Abstract class for transformers that transform one dataset into another.
+    from pyspark.pandas.base import IndexOpsMixin
 
-    .. versionadded:: 1.3.0
-    """
-
-    @abstractmethod
-    def _transform(self, dataset: DataFrame) -> DataFrame:
-        """
-        Transforms the input dataset.
-
-        Parameters
-        ----------
-        dataset : :py:class:`pyspark.sql.DataFrame`
-            input dataset.
-
-        Returns
-        -------
-        :py:class:`pyspark.sql.DataFrame`
-            transformed dataset
-        """
-        raise NotImplementedError()
-
-    def transform(self, dataset: DataFrame, params: Optional["ParamMap"] = None) -> DataFrame:
-        """
-        Transforms the input dataset with optional parameters.
-
-        .. versionadded:: 1.3.0
-
-        Parameters
-        ----------
-        dataset : :py:class:`pyspark.sql.DataFrame`
-            input dataset
-        params : dict, optional
-            an optional param map that overrides embedded params.
-
-        Returns
-        -------
-        :py:class:`pyspark.sql.DataFrame`
-            transformed dataset
-        """
-        if params is None:
-            params = dict()
-        if isinstance(params, dict):
-            if params:
-                return self.copy(params)._transform(dataset)
-            else:
-                return self._transform(dataset)
-        else:
-            raise TypeError("Params must be a param map but got %s." % type(params))
-
-
-@inherit_doc
-class Model(Transformer, metaclass=ABCMeta):
-    """
-    Abstract class for models that are fitted by estimators.
-
-    .. versionadded:: 1.4.0
-    """
-
-    pass
-
-
-@inherit_doc
-class UnaryTransformer(HasInputCol, HasOutputCol, Transformer):
-    """
-    Abstract class for transformers that take one input column, apply transformation,
-    and output the result as a new column.
-
-    .. versionadded:: 2.3.0
-    """
-
-    def setInputCol(self: P, value: str) -> P:
-        """
-        Sets the value of :py:attr:`inputCol`.
-        """
-        return self._set(inputCol=value)
-
-    def setOutputCol(self: P, value: str) -> P:
-        """
-        Sets the value of :py:attr:`outputCol`.
-        """
-        return self._set(outputCol=value)
-
-    @abstractmethod
-    def createTransformFunc(self) -> Callable[..., Any]:
-        """
-        Creates the transform function using the given param map. The input param map already takes
-        account of the embedded param map. So the param values should be determined
-        solely by the input param map.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def outputDataType(self) -> DataType:
-        """
-        Returns the data type of the output column.
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def validateInputType(self, inputType: DataType) -> None:
-        """
-        Validates the input type. Throw an exception if it is invalid.
-        """
-        raise NotImplementedError()
-
-    def transformSchema(self, schema: StructType) -> StructType:
-        inputType = schema[self.getInputCol()].dataType
-        self.validateInputType(inputType)
-        if self.getOutputCol() in schema.names:
-            raise ValueError("Output column %s already exists." % self.getOutputCol())
-        outputFields = copy.copy(schema.fields)
-        outputFields.append(StructField(self.getOutputCol(), self.outputDataType(), nullable=False))
-        return StructType(outputFields)
-
-    def _transform(self, dataset: DataFrame) -> DataFrame:
-        self.transformSchema(dataset.schema)
-        transformUDF = udf(self.createTransformFunc(), self.outputDataType())
-        transformedDataset = dataset.withColumn(
-            self.getOutputCol(), transformUDF(dataset[self.getInputCol()])
+    if isinstance(operand, IndexOpsMixin) and isinstance(operand.spark.data_type, BooleanType):
+        assert spark_type, "spark_type must be provided if the operand is a boolean IndexOpsMixin"
+        assert isinstance(spark_type, NumericType), "spark_type must be NumericType"
+        dtype = spark_type_to_pandas_dtype(
+            spark_type, use_extension_dtypes=operand._internal.data_fields[0].is_extension_dtype
         )
-        return transformedDataset
+        return operand._with_new_scol(
+            operand.spark.column.cast(spark_type),
+            field=operand._internal.data_fields[0].copy(dtype=dtype, spark_type=spark_type),
+        )
+    elif isinstance(operand, bool):
+        return int(operand)
+    else:
+        return operand
 
 
-@inherit_doc
-class _PredictorParams(HasLabelCol, HasFeaturesCol, HasPredictionCol):
+def _as_categorical_type(
+    index_ops: IndexOpsLike, dtype: CategoricalDtype, spark_type: DataType
+) -> IndexOpsLike:
+    """Cast `index_ops` to categorical dtype, given `dtype` and `spark_type`."""
+    assert isinstance(dtype, CategoricalDtype)
+    if dtype.categories is None:
+        codes, uniques = index_ops.factorize()
+        categories = uniques.astype(index_ops.dtype)
+        return codes._with_new_scol(
+            codes.spark.column,
+            field=codes._internal.data_fields[0].copy(
+                dtype=CategoricalDtype(categories=categories)
+            ),
+        )
+    else:
+        categories = dtype.categories
+        if len(categories) == 0:
+            scol = F.lit(-1)
+        else:
+            kvs = chain(
+                *[(F.lit(category), F.lit(code)) for code, category in enumerate(categories)]
+            )
+            map_scol = F.create_map(*kvs)
+
+            scol = F.coalesce(map_scol[index_ops.spark.column], F.lit(-1))
+        return index_ops._with_new_scol(
+            scol.cast(spark_type),
+            field=index_ops._internal.data_fields[0].copy(
+                dtype=dtype, spark_type=spark_type, nullable=False
+            ),
+        )
+
+
+def _as_bool_type(index_ops: IndexOpsLike, dtype: Dtype) -> IndexOpsLike:
+    """Cast `index_ops` to BooleanType Spark type, given `dtype`."""
+    spark_type = BooleanType()
+    if isinstance(dtype, extension_dtypes):
+        scol = index_ops.spark.column.cast(spark_type)
+    else:
+        scol = F.when(index_ops.spark.column.isNull(), F.lit(False)).otherwise(
+            index_ops.spark.column.cast(spark_type)
+        )
+    return index_ops._with_new_scol(
+        scol, field=index_ops._internal.data_fields[0].copy(dtype=dtype, spark_type=spark_type)
+    )
+
+
+def _as_string_type(
+    index_ops: IndexOpsLike, dtype: Dtype, *, null_str: str = str(None)
+) -> IndexOpsLike:
+    """Cast `index_ops` to StringType Spark type, given `dtype` and `null_str`,
+    representing null Spark column. Note that `null_str` is for non-extension dtypes only.
     """
-    Params for :py:class:`Predictor` and :py:class:`PredictorModel`.
+    spark_type = StringType()
+    if isinstance(dtype, extension_dtypes):
+        scol = index_ops.spark.column.cast(spark_type)
+    else:
+        casted = index_ops.spark.column.cast(spark_type)
+        scol = F.when(index_ops.spark.column.isNull(), null_str).otherwise(casted)
+    return index_ops._with_new_scol(
+        scol, field=index_ops._internal.data_fields[0].copy(dtype=dtype, spark_type=spark_type)
+    )
 
-    .. versionadded:: 3.0.0
+
+def _as_other_type(index_ops: IndexOpsLike, dtype: Dtype, spark_type: DataType) -> IndexOpsLike:
+    """Cast `index_ops` to a `dtype` (`spark_type`) that needs no pre-processing.
+
+    Destination types that need pre-processing: CategoricalDtype, BooleanType, and StringType.
     """
+    from pyspark.pandas.internal import InternalField
 
-    pass
+    need_pre_process = (
+        isinstance(dtype, CategoricalDtype)
+        or isinstance(spark_type, BooleanType)
+        or isinstance(spark_type, StringType)
+    )
+    assert not need_pre_process, "Pre-processing is needed before the type casting."
 
-
-@inherit_doc
-class Predictor(Estimator[M], _PredictorParams, metaclass=ABCMeta):
-    """
-    Estimator for prediction tasks (regression and classification).
-    """
-
-    @since("3.0.0")
-    def setLabelCol(self: P, value: str) -> P:
-        """
-        Sets the value of :py:attr:`labelCol`.
-        """
-        return self._set(labelCol=value)
-
-    @since("3.0.0")
-    def setFeaturesCol(self: P, value: str) -> P:
-        """
-        Sets the value of :py:attr:`featuresCol`.
-        """
-        return self._set(featuresCol=value)
-
-    @since("3.0.0")
-    def setPredictionCol(self: P, value: str) -> P:
-        """
-        Sets the value of :py:attr:`predictionCol`.
-        """
-        return self._set(predictionCol=value)
+    scol = index_ops.spark.column.cast(spark_type)
+    return index_ops._with_new_scol(scol, field=InternalField(dtype=dtype))
 
 
-@inherit_doc
-class PredictionModel(Model, _PredictorParams, Generic[T], metaclass=ABCMeta):
-    """
-    Model for prediction tasks (regression and classification).
-    """
+def _sanitize_list_like(operand: Any) -> None:
+    """Raise TypeError if operand is list-like."""
+    if isinstance(operand, (list, tuple, dict, set)):
+        raise TypeError("The operation can not be applied to %s." % type(operand).__name__)
 
-    @since("3.0.0")
-    def setFeaturesCol(self: P, value: str) -> P:
-        """
-        Sets the value of :py:attr:`featuresCol`.
-        """
-        return self._set(featuresCol=value)
 
-    @since("3.0.0")
-    def setPredictionCol(self: P, value: str) -> P:
-        """
-        Sets the value of :py:attr:`predictionCol`.
-        """
-        return self._set(predictionCol=value)
+def _is_valid_for_logical_operator(right: Any) -> bool:
+    from pyspark.pandas.base import IndexOpsMixin
 
-    @property  # type: ignore[misc]
-    @abstractmethod
-    @since("2.1.0")
-    def numFeatures(self) -> int:
-        """
-        Returns the number of features the model was trained on. If unknown, returns -1
-        """
+    return isinstance(right, (int, bool)) or (
+        isinstance(right, IndexOpsMixin)
+        and (
+            isinstance(right.spark.data_type, BooleanType)
+            or isinstance(right.spark.data_type, IntegralType)
+        )
+    )
+
+
+def _is_boolean_type(right: Any) -> bool:
+    from pyspark.pandas.base import IndexOpsMixin
+
+    return isinstance(right, bool) or (
+        isinstance(right, IndexOpsMixin) and isinstance(right.spark.data_type, BooleanType)
+    )
+
+
+class DataTypeOps(object, metaclass=ABCMeta):
+    """The base class for binary operations of pandas-on-Spark objects (of different data types)."""
+
+    def __new__(cls, dtype: Dtype, spark_type: DataType) -> "DataTypeOps":
+        from pyspark.pandas.data_type_ops.binary_ops import BinaryOps
+        from pyspark.pandas.data_type_ops.boolean_ops import BooleanOps, BooleanExtensionOps
+        from pyspark.pandas.data_type_ops.categorical_ops import CategoricalOps
+        from pyspark.pandas.data_type_ops.complex_ops import ArrayOps, MapOps, StructOps
+        from pyspark.pandas.data_type_ops.date_ops import DateOps
+        from pyspark.pandas.data_type_ops.datetime_ops import DatetimeOps, DatetimeNTZOps
+        from pyspark.pandas.data_type_ops.null_ops import NullOps
+        from pyspark.pandas.data_type_ops.num_ops import (
+            DecimalOps,
+            FractionalExtensionOps,
+            FractionalOps,
+            IntegralExtensionOps,
+            IntegralOps,
+        )
+        from pyspark.pandas.data_type_ops.string_ops import StringOps, StringExtensionOps
+        from pyspark.pandas.data_type_ops.timedelta_ops import TimedeltaOps
+        from pyspark.pandas.data_type_ops.udt_ops import UDTOps
+
+        if isinstance(dtype, CategoricalDtype):
+            return object.__new__(CategoricalOps)
+        elif isinstance(spark_type, DecimalType):
+            return object.__new__(DecimalOps)
+        elif isinstance(spark_type, FractionalType):
+            if extension_float_dtypes_available and type(dtype) in [Float32Dtype, Float64Dtype]:
+                return object.__new__(FractionalExtensionOps)
+            else:
+                return object.__new__(FractionalOps)
+        elif isinstance(spark_type, IntegralType):
+            if extension_dtypes_available and type(dtype) in [
+                Int8Dtype,
+                Int16Dtype,
+                Int32Dtype,
+                Int64Dtype,
+            ]:
+                return object.__new__(IntegralExtensionOps)
+            else:
+                return object.__new__(IntegralOps)
+        elif isinstance(spark_type, StringType):
+            if extension_object_dtypes_available and isinstance(dtype, StringDtype):
+                return object.__new__(StringExtensionOps)
+            else:
+                return object.__new__(StringOps)
+        elif isinstance(spark_type, BooleanType):
+            if extension_object_dtypes_available and isinstance(dtype, BooleanDtype):
+                return object.__new__(BooleanExtensionOps)
+            else:
+                return object.__new__(BooleanOps)
+        elif isinstance(spark_type, TimestampType):
+            return object.__new__(DatetimeOps)
+        elif isinstance(spark_type, TimestampNTZType):
+            return object.__new__(DatetimeNTZOps)
+        elif isinstance(spark_type, DateType):
+            return object.__new__(DateOps)
+        elif isinstance(spark_type, DayTimeIntervalType):
+            return object.__new__(TimedeltaOps)
+        elif isinstance(spark_type, BinaryType):
+            return object.__new__(BinaryOps)
+        elif isinstance(spark_type, ArrayType):
+            return object.__new__(ArrayOps)
+        elif isinstance(spark_type, MapType):
+            return object.__new__(MapOps)
+        elif isinstance(spark_type, StructType):
+            return object.__new__(StructOps)
+        elif isinstance(spark_type, NullType):
+            return object.__new__(NullOps)
+        elif isinstance(spark_type, UserDefinedType):
+            return object.__new__(UDTOps)
+        else:
+            raise TypeError("Type %s was not understood." % dtype)
+
+    def __init__(self, dtype: Dtype, spark_type: DataType):
+        self.dtype = dtype
+        self.spark_type = spark_type
+
+    @property
+    def pretty_name(self) -> str:
         raise NotImplementedError()
 
-    @abstractmethod
-    @since("3.0.0")
-    def predict(self, value: T) -> float:
-        """
-        Predict label for the given features.
-        """
-        raise NotImplementedError()
+    def add(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Addition can not be applied to %s." % self.pretty_name)
+
+    def sub(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Subtraction can not be applied to %s." % self.pretty_name)
+
+    def mul(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Multiplication can not be applied to %s." % self.pretty_name)
+
+    def truediv(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("True division can not be applied to %s." % self.pretty_name)
+
+    def floordiv(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Floor division can not be applied to %s." % self.pretty_name)
+
+    def mod(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Modulo can not be applied to %s." % self.pretty_name)
+
+    def pow(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Exponentiation can not be applied to %s." % self.pretty_name)
+
+    def radd(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Addition can not be applied to %s." % self.pretty_name)
+
+    def rsub(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Subtraction can not be applied to %s." % self.pretty_name)
+
+    def rmul(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Multiplication can not be applied to %s." % self.pretty_name)
+
+    def rtruediv(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("True division can not be applied to %s." % self.pretty_name)
+
+    def rfloordiv(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Floor division can not be applied to %s." % self.pretty_name)
+
+    def rmod(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Modulo can not be applied to %s." % self.pretty_name)
+
+    def rpow(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Exponentiation can not be applied to %s." % self.pretty_name)
+
+    def __and__(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Bitwise and can not be applied to %s." % self.pretty_name)
+
+    def xor(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Bitwise xor can not be applied to %s." % self.pretty_name)
+
+    def __or__(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("Bitwise or can not be applied to %s." % self.pretty_name)
+
+    def rand(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        _sanitize_list_like(right)
+        return left.__and__(right)
+
+    def rxor(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        _sanitize_list_like(right)
+        return left ^ right
+
+    def ror(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        _sanitize_list_like(right)
+        return left.__or__(right)
+
+    def neg(self, operand: IndexOpsLike) -> IndexOpsLike:
+        raise TypeError("Unary - can not be applied to %s." % self.pretty_name)
+
+    def abs(self, operand: IndexOpsLike) -> IndexOpsLike:
+        raise TypeError("abs() can not be applied to %s." % self.pretty_name)
+
+    def lt(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("< can not be applied to %s." % self.pretty_name)
+
+    def le(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("<= can not be applied to %s." % self.pretty_name)
+
+    def gt(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError("> can not be applied to %s." % self.pretty_name)
+
+    def ge(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        raise TypeError(">= can not be applied to %s." % self.pretty_name)
+
+    def eq(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        if isinstance(right, (list, tuple)):
+            from pyspark.pandas.series import first_series, scol_for
+            from pyspark.pandas.frame import DataFrame
+            from pyspark.pandas.internal import NATURAL_ORDER_COLUMN_NAME, InternalField
+
+            if len(left) != len(right):
+                raise ValueError("Lengths must be equal")
+
+            sdf = left._internal.spark_frame
+            structed_scol = F.struct(
+                sdf[NATURAL_ORDER_COLUMN_NAME],
+                *left._internal.index_spark_columns,
+                left.spark.column,
+            )
+            # The size of the list is expected to be small.
+            collected_structed_scol = F.collect_list(structed_scol)
+            # Sort the array by NATURAL_ORDER_COLUMN so that we can guarantee the order.
+            collected_structed_scol = F.array_sort(collected_structed_scol)
+            right_values_scol = F.array(*(F.lit(x) for x in right))
+            index_scol_names = left._internal.index_spark_column_names
+            scol_name = left._internal.spark_column_name_for(left._internal.column_labels[0])
+            # Compare the values of left and right by using zip_with function.
+            cond = F.zip_with(
+                collected_structed_scol,
+                right_values_scol,
+                lambda x, y: F.struct(
+                    *[
+                        x[index_scol_name].alias(index_scol_name)
+                        for index_scol_name in index_scol_names
+                    ],
+                    F.when(x[scol_name].isNull() | y.isNull(), False)
+                    .otherwise(
+                        x[scol_name] == y,
+                    )
+                    .alias(scol_name),
+                ),
+            ).alias(scol_name)
+            # 1. `sdf_new` here looks like the below (the first field of each set is Index):
+            # +----------------------------------------------------------+
+            # |0                                                         |
+            # +----------------------------------------------------------+
+            # |[{0, false}, {1, true}, {2, false}, {3, true}, {4, false}]|
+            # +----------------------------------------------------------+
+            sdf_new = sdf.select(cond)
+            # 2. `sdf_new` after the explode looks like the below:
+            # +----------+
+            # |       col|
+            # +----------+
+            # |{0, false}|
+            # | {1, true}|
+            # |{2, false}|
+            # | {3, true}|
+            # |{4, false}|
+            # +----------+
+            sdf_new = sdf_new.select(F.explode(scol_name))
+            # 3. Here, the final `sdf_new` looks like the below:
+            # +-----------------+-----+
+            # |__index_level_0__|    0|
+            # +-----------------+-----+
+            # |                0|false|
+            # |                1| true|
+            # |                2|false|
+            # |                3| true|
+            # |                4|false|
+            # +-----------------+-----+
+            sdf_new = sdf_new.select("col.*")
+
+            index_spark_columns = [
+                scol_for(sdf_new, index_scol_name) for index_scol_name in index_scol_names
+            ]
+            data_spark_columns = [scol_for(sdf_new, scol_name)]
+
+            internal = left._internal.copy(
+                spark_frame=sdf_new,
+                index_spark_columns=index_spark_columns,
+                data_spark_columns=data_spark_columns,
+                index_fields=[
+                    InternalField.from_struct_field(index_field)
+                    for index_field in sdf_new.select(index_spark_columns).schema.fields
+                ],
+                data_fields=[
+                    InternalField.from_struct_field(
+                        sdf_new.select(data_spark_columns).schema.fields[0]
+                    )
+                ],
+            )
+            return first_series(DataFrame(internal))
+        else:
+            from pyspark.pandas.base import column_op
+
+            return column_op(Column.__eq__)(left, right)
+
+    def ne(self, left: IndexOpsLike, right: Any) -> SeriesOrIndex:
+        from pyspark.pandas.base import column_op
+
+        _sanitize_list_like(right)
+
+        return column_op(Column.__ne__)(left, right)
+
+    def invert(self, operand: IndexOpsLike) -> IndexOpsLike:
+        raise TypeError("Unary ~ can not be applied to %s." % self.pretty_name)
+
+    def restore(self, col: pd.Series) -> pd.Series:
+        """Restore column when to_pandas."""
+        return col
+
+    def prepare(self, col: pd.Series) -> pd.Series:
+        """Prepare column when from_pandas."""
+        return col.replace({np.nan: None})
+
+    def isnull(self, index_ops: IndexOpsLike) -> IndexOpsLike:
+        return index_ops._with_new_scol(
+            index_ops.spark.column.isNull(),
+            field=index_ops._internal.data_fields[0].copy(
+                dtype=np.dtype("bool"), spark_type=BooleanType(), nullable=False
+            ),
+        )
+
+    def nan_to_null(self, index_ops: IndexOpsLike) -> IndexOpsLike:
+        return index_ops.copy()
+
+    def astype(self, index_ops: IndexOpsLike, dtype: Union[str, type, Dtype]) -> IndexOpsLike:
+        raise TypeError("astype can not be applied to %s." % self.pretty_name)
