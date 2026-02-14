@@ -14,103 +14,189 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+"""
+Helpers and utilities to deal with PySpark instances
+"""
+from typing import overload
 
-import re
-from typing import Dict
-
-from pyspark.errors.error_classes import ERROR_CLASSES_MAP
+from pyspark.sql.types import DecimalType, StructType, MapType, ArrayType, StructField, DataType
 
 
-class ErrorClassesReader:
+@overload
+def as_nullable_spark_type(dt: StructType) -> StructType:
+    ...
+
+
+@overload
+def as_nullable_spark_type(dt: ArrayType) -> ArrayType:
+    ...
+
+
+@overload
+def as_nullable_spark_type(dt: MapType) -> MapType:
+    ...
+
+
+@overload
+def as_nullable_spark_type(dt: DataType) -> DataType:
+    ...
+
+
+def as_nullable_spark_type(dt: DataType) -> DataType:
     """
-    A reader to load error information from error_classes.py.
+    Returns a nullable schema or data types.
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import *
+    >>> as_nullable_spark_type(StructType([
+    ...     StructField("A", IntegerType(), True),
+    ...     StructField("B", FloatType(), False)]))  # doctest: +NORMALIZE_WHITESPACE
+    StructType([StructField('A', IntegerType(), True), StructField('B', FloatType(), True)])
+
+    >>> as_nullable_spark_type(StructType([
+    ...     StructField("A",
+    ...         StructType([
+    ...             StructField('a',
+    ...                 MapType(IntegerType(),
+    ...                 ArrayType(IntegerType(), False), False), False),
+    ...             StructField('b', StringType(), True)])),
+    ...     StructField("B", FloatType(), False)]))  # doctest: +NORMALIZE_WHITESPACE
+    StructType([StructField('A',
+        StructType([StructField('a',
+            MapType(IntegerType(),
+            ArrayType(IntegerType(), True), True), True),
+        StructField('b', StringType(), True)]), True),
+    StructField('B', FloatType(), True)])
     """
-
-    def __init__(self) -> None:
-        self.error_info_map = ERROR_CLASSES_MAP
-
-    def get_error_message(self, error_class: str, message_parameters: Dict[str, str]) -> str:
-        """
-        Returns the completed error message by applying message parameters to the message template.
-        """
-        message_template = self.get_message_template(error_class)
-        # Verify message parameters.
-        message_parameters_from_template = re.findall("<([a-zA-Z0-9_-]+)>", message_template)
-        assert set(message_parameters_from_template) == set(message_parameters), (
-            f"Undifined error message parameter for error class: {error_class}. "
-            f"Parameters: {message_parameters}"
+    if isinstance(dt, StructType):
+        new_fields = []
+        for field in dt.fields:
+            new_fields.append(
+                StructField(
+                    field.name,
+                    as_nullable_spark_type(field.dataType),
+                    nullable=True,
+                    metadata=field.metadata,
+                )
+            )
+        return StructType(new_fields)
+    elif isinstance(dt, ArrayType):
+        return ArrayType(as_nullable_spark_type(dt.elementType), containsNull=True)
+    elif isinstance(dt, MapType):
+        return MapType(
+            as_nullable_spark_type(dt.keyType),
+            as_nullable_spark_type(dt.valueType),
+            valueContainsNull=True,
         )
-        table = str.maketrans("<>", "{}")
+    else:
+        return dt
 
-        return message_template.translate(table).format(**message_parameters)
 
-    def get_message_template(self, error_class: str) -> str:
-        """
-        Returns the message template for corresponding error class from error_classes.py.
+@overload
+def force_decimal_precision_scale(
+    dt: StructType, *, precision: int = ..., scale: int = ...
+) -> StructType:
+    ...
 
-        For example,
-        when given `error_class` is "EXAMPLE_ERROR_CLASS",
-        and corresponding error class in error_classes.py looks like the below:
 
-        .. code-block:: python
+@overload
+def force_decimal_precision_scale(
+    dt: ArrayType, *, precision: int = ..., scale: int = ...
+) -> ArrayType:
+    ...
 
-            "EXAMPLE_ERROR_CLASS" : {
-              "message" : [
-                "Problem <A> because of <B>."
-              ]
-            }
 
-        In this case, this function returns:
-        "Problem <A> because of <B>."
+@overload
+def force_decimal_precision_scale(
+    dt: MapType, *, precision: int = ..., scale: int = ...
+) -> MapType:
+    ...
 
-        For sub error class, when given `error_class` is "EXAMPLE_ERROR_CLASS.SUB_ERROR_CLASS",
-        and corresponding error class in error_classes.py looks like the below:
 
-        .. code-block:: python
+@overload
+def force_decimal_precision_scale(
+    dt: DataType, *, precision: int = ..., scale: int = ...
+) -> DataType:
+    ...
 
-            "EXAMPLE_ERROR_CLASS" : {
-              "message" : [
-                "Problem <A> because of <B>."
-              ],
-              "subClass" : {
-                "SUB_ERROR_CLASS" : {
-                  "message" : [
-                    "Do <C> to fix the problem."
-                  ]
-                }
-              }
-            }
 
-        In this case, this function returns:
-        "Problem <A> because <B>. Do <C> to fix the problem."
-        """
-        error_classes = error_class.split(".")
-        len_error_classes = len(error_classes)
-        assert len_error_classes in (1, 2)
+def force_decimal_precision_scale(
+    dt: DataType, *, precision: int = 38, scale: int = 18
+) -> DataType:
+    """
+    Returns a data type with a fixed decimal type.
 
-        # Generate message template for main error class.
-        main_error_class = error_classes[0]
-        if main_error_class in self.error_info_map:
-            main_error_class_info_map = self.error_info_map[main_error_class]
-        else:
-            raise ValueError(f"Cannot find main error class '{main_error_class}'")
+    The precision and scale of the decimal type are fixed with the given values.
 
-        main_message_template = "\n".join(main_error_class_info_map["message"])
+    Examples
+    --------
+    >>> from pyspark.sql.types import *
+    >>> force_decimal_precision_scale(StructType([
+    ...     StructField("A", DecimalType(10, 0), True),
+    ...     StructField("B", DecimalType(14, 7), False)]))  # doctest: +NORMALIZE_WHITESPACE
+    StructType([StructField('A', DecimalType(38,18), True),
+                StructField('B', DecimalType(38,18), False)])
 
-        has_sub_class = len_error_classes == 2
+    >>> force_decimal_precision_scale(StructType([
+    ...     StructField("A",
+    ...         StructType([
+    ...             StructField('a',
+    ...                 MapType(DecimalType(5, 0),
+    ...                 ArrayType(DecimalType(20, 0), False), False), False),
+    ...             StructField('b', StringType(), True)])),
+    ...     StructField("B", DecimalType(30, 15), False)]),
+    ...     precision=30, scale=15)  # doctest: +NORMALIZE_WHITESPACE
+    StructType([StructField('A',
+        StructType([StructField('a',
+            MapType(DecimalType(30,15),
+            ArrayType(DecimalType(30,15), False), False), False),
+        StructField('b', StringType(), True)]), True),
+    StructField('B', DecimalType(30,15), False)])
+    """
+    if isinstance(dt, StructType):
+        new_fields = []
+        for field in dt.fields:
+            new_fields.append(
+                StructField(
+                    field.name,
+                    force_decimal_precision_scale(field.dataType, precision=precision, scale=scale),
+                    nullable=field.nullable,
+                    metadata=field.metadata,
+                )
+            )
+        return StructType(new_fields)
+    elif isinstance(dt, ArrayType):
+        return ArrayType(
+            force_decimal_precision_scale(dt.elementType, precision=precision, scale=scale),
+            containsNull=dt.containsNull,
+        )
+    elif isinstance(dt, MapType):
+        return MapType(
+            force_decimal_precision_scale(dt.keyType, precision=precision, scale=scale),
+            force_decimal_precision_scale(dt.valueType, precision=precision, scale=scale),
+            valueContainsNull=dt.valueContainsNull,
+        )
+    elif isinstance(dt, DecimalType):
+        return DecimalType(precision=precision, scale=scale)
+    else:
+        return dt
 
-        if not has_sub_class:
-            message_template = main_message_template
-        else:
-            # Generate message template for sub error class if exists.
-            sub_error_class = error_classes[1]
-            main_error_class_subclass_info_map = main_error_class_info_map["subClass"]
-            if sub_error_class in main_error_class_subclass_info_map:
-                sub_error_class_info_map = main_error_class_subclass_info_map[sub_error_class]
-            else:
-                raise ValueError(f"Cannot find sub error class '{sub_error_class}'")
 
-            sub_message_template = "\n".join(sub_error_class_info_map["message"])
-            message_template = main_message_template + " " + sub_message_template
+def _test() -> None:
+    import doctest
+    import sys
+    import pyspark.pandas.spark.utils
 
-        return message_template
+    globs = pyspark.pandas.spark.utils.__dict__.copy()
+    (failure_count, test_count) = doctest.testmod(
+        pyspark.pandas.spark.utils,
+        globs=globs,
+        optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE,
+    )
+    if failure_count:
+        sys.exit(-1)
+
+
+if __name__ == "__main__":
+    _test()
