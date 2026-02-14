@@ -14,3 +14,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+"""
+RDD-based machine learning APIs for Python (in maintenance mode).
+
+The `pyspark.mllib` package is in maintenance mode as of the Spark 2.0.0 release to encourage
+migration to the DataFrame-based APIs under the `pyspark.ml` package.
+"""
+# MLlib currently needs NumPy 1.4+, so complain if lower
+
+import numpy
+
+ver = [int(x) for x in numpy.version.version.split(".")[:2]]
+if ver < [1, 4]:
+    raise RuntimeError("MLlib requires NumPy 1.4+")
+
+__all__ = [
+    "classification",
+    "clustering",
+    "feature",
+    "fpm",
+    "linalg",
+    "random",
+    "recommendation",
+    "regression",
+    "stat",
+    "tree",
+    "util",
+]
