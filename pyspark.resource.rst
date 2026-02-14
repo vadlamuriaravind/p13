@@ -16,17 +16,23 @@
     under the License.
 
 
-============
-Core Classes
-============
+===================
+Resource Management
+===================
 
-.. currentmodule:: pyspark.sql.streaming
+Core Classes
+------------
+
+.. currentmodule:: pyspark.resource
 
 .. autosummary::
     :toctree: api/
 
-    DataStreamReader
-    DataStreamWriter
-    StreamingQuery
-    StreamingQueryManager
-    StreamingQueryListener
+    ResourceInformation
+    ResourceProfile
+    ResourceProfileBuilder
+    ExecutorResourceRequest
+    ExecutorResourceRequests
+    TaskResourceRequest
+    TaskResourceRequests
+

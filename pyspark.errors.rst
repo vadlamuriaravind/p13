@@ -16,17 +16,38 @@
     under the License.
 
 
-============
-Core Classes
-============
+======
+Errors
+======
 
-.. currentmodule:: pyspark.sql.streaming
+Classes
+-------
+
+.. currentmodule:: pyspark.errors
 
 .. autosummary::
     :toctree: api/
 
-    DataStreamReader
-    DataStreamWriter
-    StreamingQuery
-    StreamingQueryManager
-    StreamingQueryListener
+    PySparkException
+    AnalysisException
+    TempTableAlreadyExistsException
+    ParseException
+    IllegalArgumentException
+    StreamingQueryException
+    QueryExecutionException
+    PythonException
+    UnknownException
+    SparkUpgradeException
+
+
+Methods
+-------
+
+.. currentmodule:: pyspark.errors
+
+.. autosummary::
+    :toctree: api/
+
+    PySparkException.getErrorClass
+    PySparkException.getMessageParameters
+    PySparkException.getSqlState

@@ -16,17 +16,30 @@
     under the License.
 
 
-============
-Core Classes
-============
+================
+Query Management
+================
 
 .. currentmodule:: pyspark.sql.streaming
 
 .. autosummary::
     :toctree: api/
 
-    DataStreamReader
-    DataStreamWriter
-    StreamingQuery
-    StreamingQueryManager
-    StreamingQueryListener
+    StreamingQuery.awaitTermination
+    StreamingQuery.exception
+    StreamingQuery.explain
+    StreamingQuery.id
+    StreamingQuery.isActive
+    StreamingQuery.lastProgress
+    StreamingQuery.name
+    StreamingQuery.processAllAvailable
+    StreamingQuery.recentProgress
+    StreamingQuery.runId
+    StreamingQuery.status
+    StreamingQuery.stop
+    StreamingQueryManager.active
+    StreamingQueryManager.addListener
+    StreamingQueryManager.awaitAnyTermination
+    StreamingQueryManager.get
+    StreamingQueryManager.removeListener
+    StreamingQueryManager.resetTerminated

@@ -16,28 +16,23 @@
     under the License.
 
 
-=========
-Spark SQL
-=========
+=============
+API Reference
+=============
 
-This page gives an overview of all public Spark SQL API.
+This page lists an overview of all public PySpark modules, classes, functions and methods.
+
+Pandas API on Spark follows the API specifications of latest pandas release.
 
 .. toctree::
-    :maxdepth: 2
+   :maxdepth: 2
 
-    core_classes
-    spark_session
-    configuration
-    io
-    dataframe
-    column
-    data_types
-    row
-    functions
-    window
-    grouping
-    catalog
-    avro
-    observation
-    udf
-    protobuf
+   pyspark.sql/index
+   pyspark.pandas/index
+   pyspark.ss/index
+   pyspark.ml
+   pyspark.streaming
+   pyspark.mllib
+   pyspark
+   pyspark.resource
+   pyspark.errors

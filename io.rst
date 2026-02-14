@@ -19,47 +19,31 @@
 ============
 Input/Output
 ============
-.. currentmodule:: pyspark.sql
+
+.. currentmodule:: pyspark.sql.streaming
 
 .. autosummary::
     :toctree: api/
 
-    DataFrameReader.csv
-    DataFrameReader.format
-    DataFrameReader.jdbc
-    DataFrameReader.json
-    DataFrameReader.load
-    DataFrameReader.option
-    DataFrameReader.options
-    DataFrameReader.orc
-    DataFrameReader.parquet
-    DataFrameReader.schema
-    DataFrameReader.table
-    DataFrameReader.text
-    DataFrameWriter.bucketBy
-    DataFrameWriter.csv
-    DataFrameWriter.format
-    DataFrameWriter.insertInto
-    DataFrameWriter.jdbc
-    DataFrameWriter.json
-    DataFrameWriter.mode
-    DataFrameWriter.option
-    DataFrameWriter.options
-    DataFrameWriter.orc
-    DataFrameWriter.parquet
-    DataFrameWriter.partitionBy
-    DataFrameWriter.save
-    DataFrameWriter.saveAsTable
-    DataFrameWriter.sortBy
-    DataFrameWriter.text
-    DataFrameWriterV2.using
-    DataFrameWriterV2.option
-    DataFrameWriterV2.options
-    DataFrameWriterV2.tableProperty
-    DataFrameWriterV2.partitionedBy
-    DataFrameWriterV2.create
-    DataFrameWriterV2.replace
-    DataFrameWriterV2.createOrReplace
-    DataFrameWriterV2.append
-    DataFrameWriterV2.overwrite
-    DataFrameWriterV2.overwritePartitions
+    DataStreamReader.csv
+    DataStreamReader.format
+    DataStreamReader.json
+    DataStreamReader.load
+    DataStreamReader.option
+    DataStreamReader.options
+    DataStreamReader.orc
+    DataStreamReader.parquet
+    DataStreamReader.schema
+    DataStreamReader.table
+    DataStreamReader.text
+    DataStreamWriter.foreach
+    DataStreamWriter.foreachBatch
+    DataStreamWriter.format
+    DataStreamWriter.option
+    DataStreamWriter.options
+    DataStreamWriter.outputMode
+    DataStreamWriter.partitionBy
+    DataStreamWriter.queryName
+    DataStreamWriter.start
+    DataStreamWriter.toTable
+    DataStreamWriter.trigger
