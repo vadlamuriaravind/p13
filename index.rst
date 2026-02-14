@@ -15,15 +15,37 @@
     specific language governing permissions and limitations
     under the License.
 
-===========
-Development
-===========
+
+================
+Migration Guides
+================
+
+This page includes links to guides that will help you migrate to PySpark.
+
+If you are upgrading from an older to a newer version of PySpark, refer to
+the following page for differences between versions:
+
+- :ref:`Upgrading PySpark</migration_guide/pyspark_upgrade.rst>`
+
+.. toctree::
+   :maxdepth: 2
+   :hidden:
+
+   pyspark_upgrade
+
+If you are migrating code from `Koalas <https://koalas.readthedocs.io/en/latest>`_ to PySpark,
+this guide is for you:
 
 .. toctree::
    :maxdepth: 2
 
-   contributing
-   testing
-   debugging
-   setting_ide
+   koalas_to_pyspark
+
+A lot of content in other migration guides can also be helpful when migrating to newer PySpark versions because PySpark internally shares the same components.
+Please also refer to the following migration guides:
+
+- `Migration Guide: SQL, Datasets and DataFrame <https://spark.apache.org/docs/latest/sql-migration-guide.html>`_
+- `Migration Guide: Structured Streaming <https://spark.apache.org/docs/latest/ss-migration-guide.html>`_
+- `Migration Guide: MLlib (Machine Learning) <https://spark.apache.org/docs/latest/ml-migration-guide.html>`_
+- `Migration Guide: Spark Core <https://spark.apache.org/docs/latest/core-migration-guide.html>`_
 
