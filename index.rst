@@ -16,22 +16,28 @@
     under the License.
 
 
-===================
-Pandas API on Spark
-===================
+=========
+Spark SQL
+=========
 
-This page gives an overview of all public pandas API on Spark.
+This page gives an overview of all public Spark SQL API.
 
 .. toctree::
-   :maxdepth: 2
+    :maxdepth: 2
 
-   io
-   general_functions
-   series
-   frame
-   indexing
-   window
-   groupby
-   resampling
-   ml
-   extensions
+    core_classes
+    spark_session
+    configuration
+    io
+    dataframe
+    column
+    data_types
+    row
+    functions
+    window
+    grouping
+    catalog
+    avro
+    observation
+    udf
+    protobuf

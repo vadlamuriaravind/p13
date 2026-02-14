@@ -16,23 +16,34 @@
     under the License.
 
 
-======
-Window
-======
-
-.. currentmodule:: pyspark.sql
+==========
+Data Types
+==========
+.. currentmodule:: pyspark.sql.types
 
 .. autosummary::
+    :template: autosummary/class_with_docs.rst
     :toctree: api/
 
-    Window.currentRow
-    Window.orderBy
-    Window.partitionBy
-    Window.rangeBetween
-    Window.rowsBetween
-    Window.unboundedFollowing
-    Window.unboundedPreceding
-    WindowSpec.orderBy
-    WindowSpec.partitionBy
-    WindowSpec.rangeBetween
-    WindowSpec.rowsBetween
+    ArrayType
+    BinaryType
+    BooleanType
+    ByteType
+    DataType
+    DateType
+    DecimalType
+    DoubleType
+    FloatType
+    IntegerType
+    LongType
+    MapType
+    NullType
+    ShortType
+    StringType
+    CharType
+    VarcharType
+    StructField
+    StructType
+    TimestampType
+    TimestampNTZType
+    DayTimeIntervalType

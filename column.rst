@@ -17,22 +17,44 @@
 
 
 ======
-Window
+Column
 ======
-
 .. currentmodule:: pyspark.sql
 
 .. autosummary::
     :toctree: api/
 
-    Window.currentRow
-    Window.orderBy
-    Window.partitionBy
-    Window.rangeBetween
-    Window.rowsBetween
-    Window.unboundedFollowing
-    Window.unboundedPreceding
-    WindowSpec.orderBy
-    WindowSpec.partitionBy
-    WindowSpec.rangeBetween
-    WindowSpec.rowsBetween
+    Column.__getattr__
+    Column.__getitem__
+    Column.alias
+    Column.asc
+    Column.asc_nulls_first
+    Column.asc_nulls_last
+    Column.astype
+    Column.between
+    Column.bitwiseAND
+    Column.bitwiseOR
+    Column.bitwiseXOR
+    Column.cast
+    Column.contains
+    Column.desc
+    Column.desc_nulls_first
+    Column.desc_nulls_last
+    Column.dropFields
+    Column.endswith
+    Column.eqNullSafe
+    Column.getField
+    Column.getItem
+    Column.ilike
+    Column.isNotNull
+    Column.isNull
+    Column.isin
+    Column.like
+    Column.name
+    Column.otherwise
+    Column.over
+    Column.rlike
+    Column.startswith
+    Column.substr
+    Column.when
+    Column.withField

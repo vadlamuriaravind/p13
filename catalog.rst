@@ -16,23 +16,39 @@
     under the License.
 
 
-======
-Window
-======
+=======
+Catalog
+=======
 
 .. currentmodule:: pyspark.sql
 
 .. autosummary::
     :toctree: api/
 
-    Window.currentRow
-    Window.orderBy
-    Window.partitionBy
-    Window.rangeBetween
-    Window.rowsBetween
-    Window.unboundedFollowing
-    Window.unboundedPreceding
-    WindowSpec.orderBy
-    WindowSpec.partitionBy
-    WindowSpec.rangeBetween
-    WindowSpec.rowsBetween
+    Catalog.cacheTable
+    Catalog.clearCache
+    Catalog.createExternalTable
+    Catalog.createTable
+    Catalog.currentCatalog
+    Catalog.currentDatabase
+    Catalog.databaseExists
+    Catalog.dropGlobalTempView
+    Catalog.dropTempView
+    Catalog.functionExists
+    Catalog.getDatabase
+    Catalog.getFunction
+    Catalog.getTable
+    Catalog.isCached
+    Catalog.listCatalogs
+    Catalog.listColumns
+    Catalog.listDatabases
+    Catalog.listFunctions
+    Catalog.listTables
+    Catalog.recoverPartitions
+    Catalog.refreshByPath
+    Catalog.refreshTable
+    Catalog.registerFunction
+    Catalog.setCurrentCatalog
+    Catalog.setCurrentDatabase
+    Catalog.tableExists
+    Catalog.uncacheTable

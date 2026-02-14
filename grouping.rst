@@ -16,23 +16,24 @@
     under the License.
 
 
-======
-Window
-======
-
+========
+Grouping
+========
 .. currentmodule:: pyspark.sql
 
 .. autosummary::
     :toctree: api/
 
-    Window.currentRow
-    Window.orderBy
-    Window.partitionBy
-    Window.rangeBetween
-    Window.rowsBetween
-    Window.unboundedFollowing
-    Window.unboundedPreceding
-    WindowSpec.orderBy
-    WindowSpec.partitionBy
-    WindowSpec.rangeBetween
-    WindowSpec.rowsBetween
+    GroupedData.agg
+    GroupedData.apply
+    GroupedData.applyInPandas
+    GroupedData.applyInPandasWithState
+    GroupedData.avg
+    GroupedData.cogroup
+    GroupedData.count
+    GroupedData.max
+    GroupedData.mean
+    GroupedData.min
+    GroupedData.pivot
+    GroupedData.sum
+    PandasCogroupedOps.applyInPandas

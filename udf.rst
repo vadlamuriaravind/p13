@@ -16,23 +16,17 @@
     under the License.
 
 
-======
-Window
-======
+===
+UDF
+===
 
 .. currentmodule:: pyspark.sql
 
 .. autosummary::
     :toctree: api/
 
-    Window.currentRow
-    Window.orderBy
-    Window.partitionBy
-    Window.rangeBetween
-    Window.rowsBetween
-    Window.unboundedFollowing
-    Window.unboundedPreceding
-    WindowSpec.orderBy
-    WindowSpec.partitionBy
-    WindowSpec.rangeBetween
-    WindowSpec.rowsBetween
+    udf.UserDefinedFunction.asNondeterministic
+    udf.UserDefinedFunction.returnType
+    UDFRegistration.register
+    UDFRegistration.registerJavaFunction
+    UDFRegistration.registerJavaUDAF

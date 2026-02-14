@@ -16,23 +16,39 @@
     under the License.
 
 
-======
-Window
-======
-
+=============
+Spark Session
+=============
 .. currentmodule:: pyspark.sql
 
 .. autosummary::
     :toctree: api/
 
-    Window.currentRow
-    Window.orderBy
-    Window.partitionBy
-    Window.rangeBetween
-    Window.rowsBetween
-    Window.unboundedFollowing
-    Window.unboundedPreceding
-    WindowSpec.orderBy
-    WindowSpec.partitionBy
-    WindowSpec.rangeBetween
-    WindowSpec.rowsBetween
+The entry point to programming Spark with the Dataset and DataFrame API.
+To create a Spark session, you should use ``SparkSession.builder`` attribute.
+See also :class:`SparkSession`.
+
+.. autosummary::
+    :toctree: api/
+
+    SparkSession.builder.appName
+    SparkSession.builder.config
+    SparkSession.builder.enableHiveSupport
+    SparkSession.builder.getOrCreate
+    SparkSession.builder.master
+    SparkSession.builder.remote
+    SparkSession.catalog
+    SparkSession.conf
+    SparkSession.createDataFrame
+    SparkSession.getActiveSession
+    SparkSession.newSession
+    SparkSession.range
+    SparkSession.read
+    SparkSession.readStream
+    SparkSession.sparkContext
+    SparkSession.sql
+    SparkSession.stop
+    SparkSession.streams
+    SparkSession.table
+    SparkSession.udf
+    SparkSession.version
