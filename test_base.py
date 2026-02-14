@@ -17,75 +17,82 @@
 
 import unittest
 
-from pyspark.sql.types import DoubleType, IntegerType
-from pyspark.testing.mlutils import (
-    MockDataset,
-    MockEstimator,
-    MockUnaryTransformer,
-    MockTransformer,
-    SparkSessionTestCase,
+from pandas.api.types import CategoricalDtype
+from pandas.api.extensions import ExtensionDtype
+
+from pyspark.pandas.data_type_ops.base import DataTypeOps
+from pyspark.pandas.data_type_ops.binary_ops import BinaryOps
+from pyspark.pandas.data_type_ops.boolean_ops import BooleanOps, BooleanExtensionOps
+from pyspark.pandas.data_type_ops.categorical_ops import CategoricalOps
+from pyspark.pandas.data_type_ops.complex_ops import ArrayOps, MapOps, StructOps
+from pyspark.pandas.data_type_ops.date_ops import DateOps
+from pyspark.pandas.data_type_ops.datetime_ops import DatetimeOps, DatetimeNTZOps
+from pyspark.pandas.data_type_ops.null_ops import NullOps
+from pyspark.pandas.data_type_ops.num_ops import IntegralOps, FractionalOps, DecimalOps
+from pyspark.pandas.data_type_ops.string_ops import StringOps
+from pyspark.pandas.data_type_ops.timedelta_ops import TimedeltaOps
+from pyspark.pandas.data_type_ops.udt_ops import UDTOps
+from pyspark.sql.types import (
+    ArrayType,
+    BinaryType,
+    BooleanType,
+    DataType,
+    DateType,
+    DayTimeIntervalType,
+    DecimalType,
+    FractionalType,
+    IntegralType,
+    MapType,
+    NullType,
+    StringType,
+    StructType,
+    TimestampType,
+    TimestampNTZType,
+    UserDefinedType,
 )
 
 
-class TransformerTests(unittest.TestCase):
-    def test_transform_invalid_type(self):
-        transformer = MockTransformer()
-        data = MockDataset()
-        self.assertRaises(TypeError, transformer.transform, data, "")
-
-
-class UnaryTransformerTests(SparkSessionTestCase):
-    def test_unary_transformer_validate_input_type(self):
-        shiftVal = 3
-        transformer = (
-            MockUnaryTransformer(shiftVal=shiftVal).setInputCol("input").setOutputCol("output")
+class BaseTest(unittest.TestCase):
+    def test_data_type_ops(self):
+        _mock_spark_type = DataType()
+        _mock_dtype = ExtensionDtype()
+        _mappings = (
+            (CategoricalDtype(), _mock_spark_type, CategoricalOps),
+            (_mock_dtype, DecimalType(), DecimalOps),
+            (_mock_dtype, FractionalType(), FractionalOps),
+            (_mock_dtype, IntegralType(), IntegralOps),
+            (_mock_dtype, StringType(), StringOps),
+            (_mock_dtype, BooleanType(), BooleanOps),
+            (_mock_dtype, TimestampType(), DatetimeOps),
+            (_mock_dtype, TimestampNTZType(), DatetimeNTZOps),
+            (_mock_dtype, DateType(), DateOps),
+            (_mock_dtype, DayTimeIntervalType(), TimedeltaOps),
+            (_mock_dtype, BinaryType(), BinaryOps),
+            (_mock_dtype, ArrayType(StringType()), ArrayOps),
+            (_mock_dtype, MapType(StringType(), IntegralType()), MapOps),
+            (_mock_dtype, StructType(), StructOps),
+            (_mock_dtype, NullType(), NullOps),
+            (_mock_dtype, UserDefinedType(), UDTOps),
         )
+        for _dtype, _spark_type, _ops in _mappings:
+            self.assertIsInstance(DataTypeOps(_dtype, _spark_type), _ops)
 
-        # should not raise any errors
-        transformer.validateInputType(DoubleType())
+        _unknow_spark_type = _mock_spark_type
+        self.assertRaises(TypeError, DataTypeOps, BooleanType(), _unknow_spark_type)
 
-        with self.assertRaises(TypeError):
-            # passing the wrong input type should raise an error
-            transformer.validateInputType(IntegerType())
+    def test_bool_ext_ops(self):
+        from pyspark.pandas.typedef.typehints import extension_object_dtypes_available
 
-    def test_unary_transformer_transform(self):
-        shiftVal = 3
-        transformer = (
-            MockUnaryTransformer(shiftVal=shiftVal).setInputCol("input").setOutputCol("output")
-        )
+        if extension_object_dtypes_available:
+            from pandas import BooleanDtype
 
-        df = self.spark.range(0, 10).toDF("input")
-        df = df.withColumn("input", df.input.cast(dataType="double"))
-
-        transformed_df = transformer.transform(df)
-        results = transformed_df.select("input", "output").collect()
-
-        for res in results:
-            self.assertEqual(res.input + shiftVal, res.output)
-
-
-class EstimatorTest(unittest.TestCase):
-    def setUp(self):
-        self.estimator = MockEstimator()
-        self.data = MockDataset()
-
-    def test_fit_invalid_params(self):
-        invalid_type_parms = ""
-        self.assertRaises(TypeError, self.estimator.fit, self.data, invalid_type_parms)
-
-    def testDefaultFitMultiple(self):
-        N = 4
-        params = [{self.estimator.fake: i} for i in range(N)]
-        modelIter = self.estimator.fitMultiple(self.data, params)
-        indexList = []
-        for index, model in modelIter:
-            self.assertEqual(model.getFake(), index)
-            indexList.append(index)
-        self.assertEqual(sorted(indexList), list(range(N)))
+            self.assertIsInstance(DataTypeOps(BooleanDtype(), BooleanType()), BooleanExtensionOps)
+        else:
+            self.assertIsInstance(DataTypeOps(ExtensionDtype(), BooleanType()), BooleanOps)
 
 
 if __name__ == "__main__":
-    from pyspark.ml.tests.test_base import *  # noqa: F401
+    from pyspark.pandas.tests.data_type_ops.test_base import *  # noqa: F401
 
     try:
         import xmlrunner
