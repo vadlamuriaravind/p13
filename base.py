@@ -15,184 +15,400 @@
 # limitations under the License.
 #
 
-from typing import Dict, Optional, cast
+from abc import ABCMeta, abstractmethod
 
-from pyspark.errors.utils import ErrorClassesReader
+import copy
+import threading
+
+from typing import (
+    Any,
+    Callable,
+    Generic,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+    TYPE_CHECKING,
+)
+
+from pyspark import since
+from pyspark.ml.param import P
+from pyspark.ml.common import inherit_doc
+from pyspark.ml.param.shared import (
+    HasInputCol,
+    HasOutputCol,
+    HasLabelCol,
+    HasFeaturesCol,
+    HasPredictionCol,
+    Params,
+)
+from pyspark.sql.dataframe import DataFrame
+from pyspark.sql.functions import udf
+from pyspark.sql.types import DataType, StructField, StructType
+
+if TYPE_CHECKING:
+    from pyspark.ml._typing import ParamMap
+
+T = TypeVar("T")
+M = TypeVar("M", bound="Transformer")
 
 
-class PySparkException(Exception):
+class _FitMultipleIterator(Generic[M]):
     """
-    Base Exception for handling errors generated from PySpark.
+    Used by default implementation of Estimator.fitMultiple to produce models in a thread safe
+    iterator. This class handles the simple case of fitMultiple where each param map should be
+    fit independently.
+
+    Parameters
+    ----------
+    fitSingleModel : function
+        Callable[[int], Transformer] which fits an estimator to a dataset.
+        `fitSingleModel` may be called up to `numModels` times, with a unique index each time.
+        Each call to `fitSingleModel` with an index should return the Model associated with
+        that index.
+    numModel : int
+        Number of models this iterator should produce.
+
+    Notes
+    -----
+    See :py:meth:`Estimator.fitMultiple` for more info.
     """
 
-    def __init__(
+    def __init__(self, fitSingleModel: Callable[[int], M], numModels: int):
+        """ """
+        self.fitSingleModel = fitSingleModel
+        self.numModel = numModels
+        self.counter = 0
+        self.lock = threading.Lock()
+
+    def __iter__(self) -> Iterator[Tuple[int, M]]:
+        return self
+
+    def __next__(self) -> Tuple[int, M]:
+        with self.lock:
+            index = self.counter
+            if index >= self.numModel:
+                raise StopIteration("No models remaining.")
+            self.counter += 1
+        return index, self.fitSingleModel(index)
+
+    def next(self) -> Tuple[int, M]:
+        """For python2 compatibility."""
+        return self.__next__()
+
+
+@inherit_doc
+class Estimator(Params, Generic[M], metaclass=ABCMeta):
+    """
+    Abstract class for estimators that fit models to data.
+
+    .. versionadded:: 1.3.0
+    """
+
+    @abstractmethod
+    def _fit(self, dataset: DataFrame) -> M:
+        """
+        Fits a model to the input dataset. This is called by the default implementation of fit.
+
+
+        Parameters
+        ----------
+        dataset : :py:class:`pyspark.sql.DataFrame`
+            input dataset
+
+        Returns
+        -------
+        :class:`Transformer`
+            fitted model
+        """
+        raise NotImplementedError()
+
+    def fitMultiple(
+        self, dataset: DataFrame, paramMaps: Sequence["ParamMap"]
+    ) -> Iterator[Tuple[int, M]]:
+        """
+        Fits a model to the input dataset for each param map in `paramMaps`.
+
+        .. versionadded:: 2.3.0
+
+        Parameters
+        ----------
+        dataset : :py:class:`pyspark.sql.DataFrame`
+            input dataset.
+        paramMaps : :py:class:`collections.abc.Sequence`
+            A Sequence of param maps.
+
+        Returns
+        -------
+        :py:class:`_FitMultipleIterator`
+            A thread safe iterable which contains one model for each param map. Each
+            call to `next(modelIterator)` will return `(index, model)` where model was fit
+            using `paramMaps[index]`. `index` values may not be sequential.
+        """
+        estimator = self.copy()
+
+        def fitSingleModel(index: int) -> M:
+            return estimator.fit(dataset, paramMaps[index])
+
+        return _FitMultipleIterator(fitSingleModel, len(paramMaps))
+
+    @overload
+    def fit(self, dataset: DataFrame, params: Optional["ParamMap"] = ...) -> M:
+        ...
+
+    @overload
+    def fit(
+        self, dataset: DataFrame, params: Union[List["ParamMap"], Tuple["ParamMap"]]
+    ) -> List[M]:
+        ...
+
+    def fit(
         self,
-        message: Optional[str] = None,
-        error_class: Optional[str] = None,
-        message_parameters: Optional[Dict[str, str]] = None,
-    ):
-        # `message` vs `error_class` & `message_parameters` are mutually exclusive.
-        assert (message is not None and (error_class is None and message_parameters is None)) or (
-            message is None and (error_class is not None and message_parameters is not None)
-        )
+        dataset: DataFrame,
+        params: Optional[Union["ParamMap", List["ParamMap"], Tuple["ParamMap"]]] = None,
+    ) -> Union[M, List[M]]:
+        """
+        Fits a model to the input dataset with optional parameters.
 
-        self.error_reader = ErrorClassesReader()
+        .. versionadded:: 1.3.0
 
-        if message is None:
-            self.message = self.error_reader.get_error_message(
-                cast(str, error_class), cast(Dict[str, str], message_parameters)
+        Parameters
+        ----------
+        dataset : :py:class:`pyspark.sql.DataFrame`
+            input dataset.
+        params : dict or list or tuple, optional
+            an optional param map that overrides embedded params. If a list/tuple of
+            param maps is given, this calls fit on each param map and returns a list of
+            models.
+
+        Returns
+        -------
+        :py:class:`Transformer` or a list of :py:class:`Transformer`
+            fitted model(s)
+        """
+        if params is None:
+            params = dict()
+        if isinstance(params, (list, tuple)):
+            models: List[Optional[M]] = [None] * len(params)
+            for index, model in self.fitMultiple(dataset, params):
+                models[index] = model
+            return cast(List[M], models)
+        elif isinstance(params, dict):
+            if params:
+                return self.copy(params)._fit(dataset)
+            else:
+                return self._fit(dataset)
+        else:
+            raise TypeError(
+                "Params must be either a param map or a list/tuple of param maps, "
+                "but got %s." % type(params)
             )
+
+
+@inherit_doc
+class Transformer(Params, metaclass=ABCMeta):
+    """
+    Abstract class for transformers that transform one dataset into another.
+
+    .. versionadded:: 1.3.0
+    """
+
+    @abstractmethod
+    def _transform(self, dataset: DataFrame) -> DataFrame:
+        """
+        Transforms the input dataset.
+
+        Parameters
+        ----------
+        dataset : :py:class:`pyspark.sql.DataFrame`
+            input dataset.
+
+        Returns
+        -------
+        :py:class:`pyspark.sql.DataFrame`
+            transformed dataset
+        """
+        raise NotImplementedError()
+
+    def transform(self, dataset: DataFrame, params: Optional["ParamMap"] = None) -> DataFrame:
+        """
+        Transforms the input dataset with optional parameters.
+
+        .. versionadded:: 1.3.0
+
+        Parameters
+        ----------
+        dataset : :py:class:`pyspark.sql.DataFrame`
+            input dataset
+        params : dict, optional
+            an optional param map that overrides embedded params.
+
+        Returns
+        -------
+        :py:class:`pyspark.sql.DataFrame`
+            transformed dataset
+        """
+        if params is None:
+            params = dict()
+        if isinstance(params, dict):
+            if params:
+                return self.copy(params)._transform(dataset)
+            else:
+                return self._transform(dataset)
         else:
-            self.message = message
+            raise TypeError("Params must be a param map but got %s." % type(params))
 
-        self.error_class = error_class
-        self.message_parameters = message_parameters
 
-    def getErrorClass(self) -> Optional[str]:
+@inherit_doc
+class Model(Transformer, metaclass=ABCMeta):
+    """
+    Abstract class for models that are fitted by estimators.
+
+    .. versionadded:: 1.4.0
+    """
+
+    pass
+
+
+@inherit_doc
+class UnaryTransformer(HasInputCol, HasOutputCol, Transformer):
+    """
+    Abstract class for transformers that take one input column, apply transformation,
+    and output the result as a new column.
+
+    .. versionadded:: 2.3.0
+    """
+
+    def setInputCol(self: P, value: str) -> P:
         """
-        Returns an error class as a string.
-
-        .. versionadded:: 3.4.0
-
-        See Also
-        --------
-        :meth:`PySparkException.getMessageParameters`
-        :meth:`PySparkException.getSqlState`
+        Sets the value of :py:attr:`inputCol`.
         """
-        return self.error_class
+        return self._set(inputCol=value)
 
-    def getMessageParameters(self) -> Optional[Dict[str, str]]:
+    def setOutputCol(self: P, value: str) -> P:
         """
-        Returns a message parameters as a dictionary.
-
-        .. versionadded:: 3.4.0
-
-        See Also
-        --------
-        :meth:`PySparkException.getErrorClass`
-        :meth:`PySparkException.getSqlState`
+        Sets the value of :py:attr:`outputCol`.
         """
-        return self.message_parameters
+        return self._set(outputCol=value)
 
-    def getSqlState(self) -> None:
+    @abstractmethod
+    def createTransformFunc(self) -> Callable[..., Any]:
         """
-        Returns an SQLSTATE as a string.
-
-        Errors generated in Python have no SQLSTATE, so it always returns None.
-
-        .. versionadded:: 3.4.0
-
-        See Also
-        --------
-        :meth:`PySparkException.getErrorClass`
-        :meth:`PySparkException.getMessageParameters`
+        Creates the transform function using the given param map. The input param map already takes
+        account of the embedded param map. So the param values should be determined
+        solely by the input param map.
         """
-        return None
+        raise NotImplementedError()
 
-    def __str__(self) -> str:
-        if self.getErrorClass() is not None:
-            return f"[{self.getErrorClass()}] {self.message}"
-        else:
-            return self.message
+    @abstractmethod
+    def outputDataType(self) -> DataType:
+        """
+        Returns the data type of the output column.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def validateInputType(self, inputType: DataType) -> None:
+        """
+        Validates the input type. Throw an exception if it is invalid.
+        """
+        raise NotImplementedError()
+
+    def transformSchema(self, schema: StructType) -> StructType:
+        inputType = schema[self.getInputCol()].dataType
+        self.validateInputType(inputType)
+        if self.getOutputCol() in schema.names:
+            raise ValueError("Output column %s already exists." % self.getOutputCol())
+        outputFields = copy.copy(schema.fields)
+        outputFields.append(StructField(self.getOutputCol(), self.outputDataType(), nullable=False))
+        return StructType(outputFields)
+
+    def _transform(self, dataset: DataFrame) -> DataFrame:
+        self.transformSchema(dataset.schema)
+        transformUDF = udf(self.createTransformFunc(), self.outputDataType())
+        transformedDataset = dataset.withColumn(
+            self.getOutputCol(), transformUDF(dataset[self.getInputCol()])
+        )
+        return transformedDataset
 
 
-class AnalysisException(PySparkException):
+@inherit_doc
+class _PredictorParams(HasLabelCol, HasFeaturesCol, HasPredictionCol):
     """
-    Failed to analyze a SQL query plan.
-    """
+    Params for :py:class:`Predictor` and :py:class:`PredictorModel`.
 
-
-class TempTableAlreadyExistsException(AnalysisException):
-    """
-    Failed to create temp view since it is already exists.
-    """
-
-
-class ParseException(AnalysisException):
-    """
-    Failed to parse a SQL command.
-    """
-
-
-class IllegalArgumentException(PySparkException):
-    """
-    Passed an illegal or inappropriate argument.
-    """
-
-
-class ArithmeticException(PySparkException):
-    """
-    Arithmetic exception thrown from Spark with an error class.
-    """
-
-
-class ArrayIndexOutOfBoundsException(PySparkException):
-    """
-    Array index out of bounds exception thrown from Spark with an error class.
+    .. versionadded:: 3.0.0
     """
 
-
-class DateTimeException(PySparkException):
-    """
-    Datetime exception thrown from Spark with an error class.
-    """
+    pass
 
 
-class NumberFormatException(IllegalArgumentException):
+@inherit_doc
+class Predictor(Estimator[M], _PredictorParams, metaclass=ABCMeta):
     """
-    Number format exception thrown from Spark with an error class.
-    """
-
-
-class StreamingQueryException(PySparkException):
-    """
-    Exception that stopped a :class:`StreamingQuery`.
+    Estimator for prediction tasks (regression and classification).
     """
 
+    @since("3.0.0")
+    def setLabelCol(self: P, value: str) -> P:
+        """
+        Sets the value of :py:attr:`labelCol`.
+        """
+        return self._set(labelCol=value)
 
-class QueryExecutionException(PySparkException):
-    """
-    Failed to execute a query.
-    """
+    @since("3.0.0")
+    def setFeaturesCol(self: P, value: str) -> P:
+        """
+        Sets the value of :py:attr:`featuresCol`.
+        """
+        return self._set(featuresCol=value)
 
-
-class PythonException(PySparkException):
-    """
-    Exceptions thrown from Python workers.
-    """
-
-
-class SparkRuntimeException(PySparkException):
-    """
-    Runtime exception thrown from Spark with an error class.
-    """
-
-
-class SparkUpgradeException(PySparkException):
-    """
-    Exception thrown because of Spark upgrade.
-    """
+    @since("3.0.0")
+    def setPredictionCol(self: P, value: str) -> P:
+        """
+        Sets the value of :py:attr:`predictionCol`.
+        """
+        return self._set(predictionCol=value)
 
 
-class UnknownException(PySparkException):
+@inherit_doc
+class PredictionModel(Model, _PredictorParams, Generic[T], metaclass=ABCMeta):
     """
-    None of the above exceptions.
-    """
-
-
-class PySparkValueError(PySparkException, ValueError):
-    """
-    Wrapper class for ValueError to support error classes.
+    Model for prediction tasks (regression and classification).
     """
 
+    @since("3.0.0")
+    def setFeaturesCol(self: P, value: str) -> P:
+        """
+        Sets the value of :py:attr:`featuresCol`.
+        """
+        return self._set(featuresCol=value)
 
-class PySparkTypeError(PySparkException, TypeError):
-    """
-    Wrapper class for TypeError to support error classes.
-    """
+    @since("3.0.0")
+    def setPredictionCol(self: P, value: str) -> P:
+        """
+        Sets the value of :py:attr:`predictionCol`.
+        """
+        return self._set(predictionCol=value)
 
+    @property  # type: ignore[misc]
+    @abstractmethod
+    @since("2.1.0")
+    def numFeatures(self) -> int:
+        """
+        Returns the number of features the model was trained on. If unknown, returns -1
+        """
+        raise NotImplementedError()
 
-class PySparkAttributeError(PySparkException, AttributeError):
-    """
-    Wrapper class for AttributeError to support error classes.
-    """
+    @abstractmethod
+    @since("3.0.0")
+    def predict(self, value: T) -> float:
+        """
+        Predict label for the given features.
+        """
+        raise NotImplementedError()
