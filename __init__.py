@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""
-This package includes the internal APIs for PySpark about interoperability
-between pandas, PySpark and PyArrow. This package should not be directly
-imported and used.
-"""
+
+from pyspark.sql.streaming.query import StreamingQuery, StreamingQueryManager  # noqa: F401
+from pyspark.sql.streaming.readwriter import DataStreamReader, DataStreamWriter  # noqa: F401
+from pyspark.sql.streaming.listener import StreamingQueryListener  # noqa: F401
+from pyspark.errors import StreamingQueryException  # noqa: F401
