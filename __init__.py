@@ -14,3 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from pyspark.pandas.indexes.base import Index  # noqa: F401
+from pyspark.pandas.indexes.datetimes import DatetimeIndex  # noqa: F401
+from pyspark.pandas.indexes.multi import MultiIndex  # noqa: F401
+from pyspark.pandas.indexes.numeric import Float64Index, Int64Index  # noqa: F401
+from pyspark.pandas.indexes.timedelta import TimedeltaIndex  # noqa: F401
