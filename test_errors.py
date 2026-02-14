@@ -1,4 +1,3 @@
-# -*- encoding: utf-8 -*-
 #
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
@@ -16,40 +15,50 @@
 # limitations under the License.
 #
 
-import json
-import unittest
+from pyspark.errors import (
+    ArithmeticException,
+    ArrayIndexOutOfBoundsException,
+    DateTimeException,
+    NumberFormatException,
+    SparkRuntimeException,
+)
+from pyspark.testing.sqlutils import ReusedSQLTestCase
 
-from pyspark.errors.error_classes import ERROR_CLASSES_JSON
-from pyspark.errors.utils import ErrorClassesReader
+
+class ErrorsTestsMixin:
+    def test_arithmetic_exception(self):
+        with self.assertRaises(ArithmeticException):
+            with self.sql_conf({"spark.sql.ansi.enabled": True}):
+                self.spark.sql("select 1/0").show()
+
+    def test_array_index_out_of_bounds_exception(self):
+        with self.assertRaises(ArrayIndexOutOfBoundsException):
+            with self.sql_conf({"spark.sql.ansi.enabled": True}):
+                self.spark.sql("select array(1, 2)[2]").show()
+
+    def test_date_time_exception(self):
+        with self.assertRaises(DateTimeException):
+            with self.sql_conf({"spark.sql.ansi.enabled": True}):
+                self.spark.sql("select unix_timestamp('2023-01-01', 'dd-MM-yyyy')").show()
+
+    def test_number_format_exception(self):
+        with self.assertRaises(NumberFormatException):
+            with self.sql_conf({"spark.sql.ansi.enabled": True}):
+                self.spark.sql("select cast('abc' as double)").show()
+
+    def test_spark_runtime_exception(self):
+        with self.assertRaises(SparkRuntimeException):
+            with self.sql_conf({"spark.sql.ansi.enabled": True}):
+                self.spark.sql("select cast('abc' as boolean)").show()
 
 
-class ErrorsTest(unittest.TestCase):
-    def test_error_classes_sorted(self):
-        # Test error classes is sorted alphabetically
-        error_reader = ErrorClassesReader()
-        error_class_names = list(error_reader.error_info_map.keys())
-        for i in range(len(error_class_names) - 1):
-            self.assertTrue(
-                error_class_names[i] < error_class_names[i + 1],
-                f"Error class [{error_class_names[i]}] should place"
-                f"after [{error_class_names[i + 1]}]",
-            )
-
-    def test_error_classes_duplicated(self):
-        # Test error classes is not duplicated
-        def detect_duplication(pairs):
-            error_classes_json = {}
-            for name, message in pairs:
-                self.assertTrue(name not in error_classes_json, f"Duplicate error class: {name}")
-                error_classes_json[name] = message
-            return error_classes_json
-
-        json.loads(ERROR_CLASSES_JSON, object_pairs_hook=detect_duplication)
+class ErrorsTests(ReusedSQLTestCase, ErrorsTestsMixin):
+    pass
 
 
 if __name__ == "__main__":
     import unittest
-    from pyspark.errors.tests.test_errors import *  # noqa: F401
+    from pyspark.sql.tests.test_errors import *  # noqa: F401
 
     try:
         import xmlrunner

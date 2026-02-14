@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 #
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
@@ -15,110 +16,69 @@
 # limitations under the License.
 #
 
-import pandas as pd
-
-from pyspark.pandas.indexes.base import Index
-from pyspark.pandas.utils import (
-    lazy_property,
-    validate_arguments_and_invoke_function,
-    validate_bool_kwarg,
-    validate_index_loc,
-    validate_mode,
+from pyspark.sql.functions import sha2
+from pyspark.errors import (
+    AnalysisException,
+    ParseException,
+    IllegalArgumentException,
+    SparkUpgradeException,
 )
-from pyspark.testing.pandasutils import PandasOnSparkTestCase
-from pyspark.testing.sqlutils import SQLTestUtils
-
-some_global_variable = 0
+from pyspark.testing.sqlutils import ReusedSQLTestCase
+from pyspark.sql.functions import to_date, unix_timestamp, from_unixtime
 
 
-class UtilsTest(PandasOnSparkTestCase, SQLTestUtils):
+class UtilsTests(ReusedSQLTestCase):
+    def test_capture_analysis_exception(self):
+        self.assertRaises(AnalysisException, lambda: self.spark.sql("select abc"))
+        self.assertRaises(AnalysisException, lambda: self.df.selectExpr("a + b"))
 
-    # a dummy to_html version with an extra parameter that pandas does not support
-    # used in test_validate_arguments_and_invoke_function
-    def to_html(self, max_rows=None, unsupported_param=None):
-        args = locals()
+    def test_capture_user_friendly_exception(self):
+        try:
+            self.spark.sql("select `中文字段`")
+        except AnalysisException as e:
+            self.assertRegex(str(e), ".*UNRESOLVED_COLUMN.*`中文字段`.*")
 
-        pdf = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}, index=[0, 1, 3])
-        validate_arguments_and_invoke_function(pdf, self.to_html, pd.DataFrame.to_html, args)
-
-    def to_clipboard(self, sep=",", **kwargs):
-        args = locals()
-
-        pdf = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}, index=[0, 1, 3])
-        validate_arguments_and_invoke_function(
-            pdf, self.to_clipboard, pd.DataFrame.to_clipboard, args
+    def test_spark_upgrade_exception(self):
+        # SPARK-32161 : Test case to Handle SparkUpgradeException in pythonic way
+        df = self.spark.createDataFrame([("2014-31-12",)], ["date_str"])
+        df2 = df.select(
+            "date_str", to_date(from_unixtime(unix_timestamp("date_str", "yyyy-dd-aa")))
         )
+        self.assertRaises(SparkUpgradeException, df2.collect)
 
-        # Support for **kwargs
-        self.to_clipboard(sep=",", index=False)
+    def test_capture_parse_exception(self):
+        self.assertRaises(ParseException, lambda: self.spark.sql("abc"))
 
-    def test_validate_arguments_and_invoke_function(self):
-        # This should pass and run fine
-        self.to_html()
-        self.to_html(unsupported_param=None)
-        self.to_html(max_rows=5)
+    def test_capture_illegalargument_exception(self):
+        self.assertRaisesRegex(
+            IllegalArgumentException,
+            "Setting negative mapred.reduce.tasks",
+            lambda: self.spark.sql("SET mapred.reduce.tasks=-1"),
+        )
+        df = self.spark.createDataFrame([(1, 2)], ["a", "b"])
+        self.assertRaisesRegex(
+            IllegalArgumentException,
+            "1024 is not in the permitted values",
+            lambda: df.select(sha2(df.a, 1024)).collect(),
+        )
+        try:
+            df.select(sha2(df.a, 1024)).collect()
+        except IllegalArgumentException as e:
+            self.assertRegex(e.desc, "1024 is not in the permitted values")
+            self.assertRegex(e.stackTrace, "org.apache.spark.sql.functions")
 
-        # This should fail because we are explicitly setting an unsupported param
-        # to a non-default value
-        with self.assertRaises(TypeError):
-            self.to_html(unsupported_param=1)
-
-    def test_lazy_property(self):
-        obj = TestClassForLazyProp()
-        # If lazy prop is not working, the second test would fail (because it'd be 2)
-        self.assert_eq(obj.lazy_prop, 1)
-        self.assert_eq(obj.lazy_prop, 1)
-
-    def test_validate_bool_kwarg(self):
-        # This should pass and run fine
-        pandas_on_spark = True
-        self.assert_eq(validate_bool_kwarg(pandas_on_spark, "pandas_on_spark"), True)
-        pandas_on_spark = False
-        self.assert_eq(validate_bool_kwarg(pandas_on_spark, "pandas_on_spark"), False)
-        pandas_on_spark = None
-        self.assert_eq(validate_bool_kwarg(pandas_on_spark, "pandas_on_spark"), None)
-
-        # This should fail because we are explicitly setting a non-boolean value
-        pandas_on_spark = "true"
-        with self.assertRaisesRegex(
-            TypeError, 'For argument "pandas_on_spark" expected type bool, received type str.'
-        ):
-            validate_bool_kwarg(pandas_on_spark, "pandas_on_spark")
-
-    def test_validate_mode(self):
-        self.assert_eq(validate_mode("a"), "append")
-        self.assert_eq(validate_mode("w"), "overwrite")
-        self.assert_eq(validate_mode("a+"), "append")
-        self.assert_eq(validate_mode("w+"), "overwrite")
-
-        with self.assertRaises(ValueError):
-            validate_mode("r")
-
-    def test_validate_index_loc(self):
-        psidx = Index([1, 2, 3])
-        validate_index_loc(psidx, -1)
-        validate_index_loc(psidx, -3)
-        err_msg = "index 4 is out of bounds for axis 0 with size 3"
-        with self.assertRaisesRegex(IndexError, err_msg):
-            validate_index_loc(psidx, 4)
-        err_msg = "index -4 is out of bounds for axis 0 with size 3"
-        with self.assertRaisesRegex(IndexError, err_msg):
-            validate_index_loc(psidx, -4)
-
-
-class TestClassForLazyProp:
-    def __init__(self):
-        self.some_variable = 0
-
-    @lazy_property
-    def lazy_prop(self):
-        self.some_variable += 1
-        return self.some_variable
+    def test_get_error_class_state(self):
+        # SPARK-36953: test CapturedException.getErrorClass and getSqlState (from SparkThrowable)
+        try:
+            self.spark.sql("""SELECT a""")
+        except AnalysisException as e:
+            self.assertEquals(e.getErrorClass(), "UNRESOLVED_COLUMN.WITHOUT_SUGGESTION")
+            self.assertEquals(e.getSqlState(), "42703")
 
 
 if __name__ == "__main__":
     import unittest
-    from pyspark.pandas.tests.test_utils import *  # noqa: F401
+    from pyspark.sql.tests.test_utils import *  # noqa: F401
 
     try:
         import xmlrunner

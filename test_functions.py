@@ -14,508 +14,1271 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import numpy as np
-import pandas as pd
+
+from contextlib import redirect_stdout
+import datetime
+from inspect import getmembers, isfunction
+import io
+from itertools import chain
+import math
+import re
 import unittest
 
-from pyspark.ml.functions import predict_batch_udf
-from pyspark.sql.functions import array, struct, col
-from pyspark.sql.types import ArrayType, DoubleType, IntegerType, StructType, StructField, FloatType
-from pyspark.testing.mlutils import SparkSessionTestCase
+from py4j.protocol import Py4JJavaError
+
+from pyspark.errors import PySparkTypeError, PySparkValueError
+from pyspark.sql import Row, Window, functions as F, types
+from pyspark.sql.column import Column
+from pyspark.testing.sqlutils import ReusedSQLTestCase, SQLTestUtils
+from pyspark.testing.utils import have_numpy
 
 
-class PredictBatchUDFTests(SparkSessionTestCase):
-    def setUp(self):
-        super(PredictBatchUDFTests, self).setUp()
-        self.data = np.arange(0, 1000, dtype=np.float64).reshape(-1, 4)
+class FunctionsTestsMixin:
+    def test_function_parity(self):
+        # This test compares the available list of functions in pyspark.sql.functions with those
+        # available in the Scala/Java DataFrame API in org.apache.spark.sql.functions.
+        #
+        # NOTE FOR DEVELOPERS:
+        # If this test fails one of the following needs to happen
+        # * If a function was added to org.apache.spark.sql.functions it either needs to be added to
+        #     pyspark.sql.functions or added to the below expected_missing_in_py set.
+        # * If a function was added to pyspark.sql.functions that was already in
+        #     org.apache.spark.sql.functions then it needs to be removed from expected_missing_in_py
+        #     below. If the function has a different name it needs to be added to py_equiv_jvm
+        #     mapping.
+        # * If it's not related to an added/removed function then likely the exclusion list
+        #     jvm_excluded_fn needs to be updated.
 
-        # 4 scalar columns
-        self.pdf = pd.DataFrame(self.data, columns=["a", "b", "c", "d"])
-        self.df = self.spark.createDataFrame(self.pdf)
+        jvm_fn_set = {name for (name, value) in getmembers(self.sc._jvm.functions)}
+        py_fn_set = {name for (name, value) in getmembers(F, isfunction) if name[0] != "_"}
 
-        # 1 tensor column of 4 doubles
-        self.pdf_tensor = pd.DataFrame()
-        self.pdf_tensor["t1"] = self.pdf.values.tolist()
-        self.df_tensor1 = self.spark.createDataFrame(self.pdf_tensor)
+        # Functions on the JVM side we do not expect to be available in python because they are
+        # depreciated, irrelevant to python, or have equivalents.
+        jvm_excluded_fn = [
+            "callUDF",  # depreciated, use call_udf
+            "typedlit",  # Scala only
+            "typedLit",  # Scala only
+            "monotonicallyIncreasingId",  # depreciated, use monotonically_increasing_id
+            "negate",  # equivalent to python -expression
+            "not",  # equivalent to python ~expression
+            "udaf",  # used for creating UDAF's which are not supported in PySpark
+        ]
 
-        # 2 tensor columns of 4 doubles and 3 doubles
-        self.pdf_tensor["t2"] = self.pdf.drop(columns="d").values.tolist()
-        self.df_tensor2 = self.spark.createDataFrame(self.pdf_tensor)
+        jvm_fn_set.difference_update(jvm_excluded_fn)
 
-        # 4 scalar columns with 1 tensor column
-        self.pdf_scalar_tensor = self.pdf
-        self.pdf_scalar_tensor["t1"] = self.pdf.values.tolist()
-        self.df_scalar_tensor = self.spark.createDataFrame(self.pdf_scalar_tensor)
+        # For functions that are named differently in pyspark this is the mapping of their
+        # python name to the JVM equivalent
+        py_equiv_jvm = {"create_map": "map"}
+        for py_name, jvm_name in py_equiv_jvm.items():
+            if py_name in py_fn_set:
+                py_fn_set.remove(py_name)
+                py_fn_set.add(jvm_name)
 
-    def test_identity_single(self):
-        def make_predict_fn():
-            def predict(inputs):
-                return inputs
+        missing_in_py = jvm_fn_set.difference(py_fn_set)
 
-            return predict
+        # Functions that we expect to be missing in python until they are added to pyspark
+        expected_missing_in_py = set()
 
-        identity = predict_batch_udf(make_predict_fn, return_type=DoubleType(), batch_size=5)
-
-        # single column input => single column output (struct)
-        preds = self.df.withColumn("preds", identity(struct("a"))).toPandas()
-        self.assertTrue(preds["a"].equals(preds["preds"]))
-
-        # single column input => single column output (col)
-        preds = self.df.withColumn("preds", identity(col("a"))).toPandas()
-        self.assertTrue(preds["a"].equals(preds["preds"]))
-
-        # single column input => single column output (str)
-        preds = self.df.withColumn("preds", identity("a")).toPandas()
-        self.assertTrue(preds["a"].equals(preds["preds"]))
-
-        # multiple column input, single input => ERROR
-        with self.assertRaisesRegex(Exception, "Multiple input columns found, but model expected"):
-            preds = self.df.withColumn("preds", identity("a", "b")).toPandas()
-
-    def test_identity_multi(self):
-        # single input model
-        def make_predict_fn():
-            def predict(inputs):
-                return {"a1": inputs[:, 0], "b1": inputs[:, 1]}
-
-            return predict
-
-        identity = predict_batch_udf(
-            make_predict_fn,
-            return_type=StructType(
-                [StructField("a1", DoubleType(), True), StructField("b1", DoubleType(), True)]
-            ),
-            batch_size=5,
+        self.assertEqual(
+            expected_missing_in_py, missing_in_py, "Missing functions in pyspark not as expected"
         )
 
-        # multiple columns using struct, single input => multiple column output
-        preds = (
-            self.df.withColumn("preds", identity(struct("a", "b")))
-            .select("a", "b", "preds.*")
-            .toPandas()
-        )
-        self.assertTrue(preds["a"].equals(preds["a1"]))
-        self.assertTrue(preds["b"].equals(preds["b1"]))
+    def test_explode(self):
+        d = [
+            Row(a=1, intlist=[1, 2, 3], mapfield={"a": "b"}),
+            Row(a=1, intlist=[], mapfield={}),
+            Row(a=1, intlist=None, mapfield=None),
+        ]
+        data = self.spark.createDataFrame(d)
 
-        # multiple columns, single input => ERROR
-        with self.assertRaisesRegex(Exception, "Multiple input columns found, but model expected"):
-            preds = (
-                self.df.withColumn("preds", identity("a", "b"))
-                .select("a", "b", "preds.*")
-                .toPandas()
+        result = data.select(F.explode(data.intlist).alias("a")).select("a").collect()
+        self.assertEqual(result[0][0], 1)
+        self.assertEqual(result[1][0], 2)
+        self.assertEqual(result[2][0], 3)
+
+        result = data.select(F.explode(data.mapfield).alias("a", "b")).select("a", "b").collect()
+        self.assertEqual(result[0][0], "a")
+        self.assertEqual(result[0][1], "b")
+
+        result = [tuple(x) for x in data.select(F.posexplode_outer("intlist")).collect()]
+        self.assertEqual(result, [(0, 1), (1, 2), (2, 3), (None, None), (None, None)])
+
+        result = [tuple(x) for x in data.select(F.posexplode_outer("mapfield")).collect()]
+        self.assertEqual(result, [(0, "a", "b"), (None, None, None), (None, None, None)])
+
+        result = [x[0] for x in data.select(F.explode_outer("intlist")).collect()]
+        self.assertEqual(result, [1, 2, 3, None, None])
+
+        result = [tuple(x) for x in data.select(F.explode_outer("mapfield")).collect()]
+        self.assertEqual(result, [("a", "b"), (None, None), (None, None)])
+
+    def test_inline(self):
+        d = [
+            Row(structlist=[Row(b=1, c=2), Row(b=3, c=4)]),
+            Row(structlist=[Row(b=None, c=5), None]),
+            Row(structlist=[]),
+        ]
+        data = self.spark.createDataFrame(d)
+
+        result = [tuple(x) for x in data.select(F.inline(data.structlist)).collect()]
+        self.assertEqual(result, [(1, 2), (3, 4), (None, 5), (None, None)])
+
+        result = [tuple(x) for x in data.select(F.inline_outer(data.structlist)).collect()]
+        self.assertEqual(result, [(1, 2), (3, 4), (None, 5), (None, None), (None, None)])
+
+    def test_basic_functions(self):
+        rdd = self.sc.parallelize(['{"foo":"bar"}', '{"foo":"baz"}'])
+        df = self.spark.read.json(rdd)
+        df.count()
+        df.collect()
+        df.schema
+
+        # cache and checkpoint
+        self.assertFalse(df.is_cached)
+        df.persist()
+        df.unpersist(True)
+        df.cache()
+        self.assertTrue(df.is_cached)
+        self.assertEqual(2, df.count())
+
+        with self.tempView("temp"):
+            df.createOrReplaceTempView("temp")
+            df = self.spark.sql("select foo from temp")
+            df.count()
+            df.collect()
+
+    def test_corr(self):
+        df = self.spark.createDataFrame([Row(a=i, b=math.sqrt(i)) for i in range(10)])
+        corr = df.stat.corr("a", "b")
+        self.assertTrue(abs(corr - 0.95734012) < 1e-6)
+
+    def test_sampleby(self):
+        df = self.spark.createDataFrame([Row(a=i, b=(i % 3)) for i in range(100)])
+        sampled = df.stat.sampleBy("b", fractions={0: 0.5, 1: 0.5}, seed=0)
+        self.assertTrue(35 <= sampled.count() <= 36)
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.sampleBy(10, fractions={0: 0.5, 1: 0.5})
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "col", "arg_type": "int"},
+        )
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.sampleBy("b", fractions=[0.5, 0.5])
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_DICT",
+            message_parameters={"arg_name": "fractions", "arg_type": "list"},
+        )
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.sampleBy("b", fractions={None: 0.5, 1: 0.5})
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="DISALLOWED_TYPE_FOR_CONTAINER",
+            message_parameters={
+                "arg_name": "fractions",
+                "arg_type": "dict",
+                "allowed_types": "float, int, str",
+                "return_type": "NoneType",
+            },
+        )
+
+    def test_cov(self):
+        df = self.spark.createDataFrame([Row(a=i, b=2 * i) for i in range(10)])
+        cov = df.stat.cov("a", "b")
+        self.assertTrue(abs(cov - 55.0 / 3) < 1e-6)
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.stat.cov(10, "b")
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_STR",
+            message_parameters={"arg_name": "col1", "arg_type": "int"},
+        )
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.stat.cov("a", True)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_STR",
+            message_parameters={"arg_name": "col2", "arg_type": "bool"},
+        )
+
+    def test_crosstab(self):
+        df = self.spark.createDataFrame([Row(a=i % 3, b=i % 2) for i in range(1, 7)])
+        ct = df.stat.crosstab("a", "b").collect()
+        ct = sorted(ct, key=lambda x: x[0])
+        for i, row in enumerate(ct):
+            self.assertEqual(row[0], str(i))
+            self.assertTrue(row[1], 1)
+            self.assertTrue(row[2], 1)
+
+    def test_math_functions(self):
+        df = self.spark.createDataFrame([Row(a=i, b=2 * i) for i in range(10)])
+
+        SQLTestUtils.assert_close(
+            [math.cos(i) for i in range(10)], df.select(F.cos(df.a)).collect()
+        )
+        SQLTestUtils.assert_close([math.cos(i) for i in range(10)], df.select(F.cos("a")).collect())
+        SQLTestUtils.assert_close(
+            [math.sin(i) for i in range(10)], df.select(F.sin(df.a)).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.sin(i) for i in range(10)], df.select(F.sin(df["a"])).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.pow(i, 2 * i) for i in range(10)], df.select(F.pow(df.a, df.b)).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.pow(i, 2) for i in range(10)], df.select(F.pow(df.a, 2)).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.pow(i, 2) for i in range(10)], df.select(F.pow(df.a, 2.0)).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.hypot(i, 2 * i) for i in range(10)], df.select(F.hypot(df.a, df.b)).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.hypot(i, 2 * i) for i in range(10)], df.select(F.hypot("a", "b")).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.hypot(i, 2) for i in range(10)], df.select(F.hypot("a", 2)).collect()
+        )
+        SQLTestUtils.assert_close(
+            [math.hypot(i, 2) for i in range(10)], df.select(F.hypot(df.a, 2)).collect()
+        )
+
+    def test_inverse_trig_functions(self):
+        df = self.spark.createDataFrame([Row(a=i * 0.2, b=i * -0.2) for i in range(10)])
+
+        def check(trig, inv, y_axis_symmetrical):
+            SQLTestUtils.assert_close(
+                [n * 0.2 for n in range(10)],
+                df.select(inv(trig(df.a))).collect(),
+            )
+            if y_axis_symmetrical:
+                SQLTestUtils.assert_close(
+                    [n * 0.2 for n in range(10)],
+                    df.select(inv(trig(df.b))).collect(),
+                )
+            else:
+                SQLTestUtils.assert_close(
+                    [n * -0.2 for n in range(10)],
+                    df.select(inv(trig(df.b))).collect(),
+                )
+
+        check(F.cosh, F.acosh, y_axis_symmetrical=True)
+        check(F.sinh, F.asinh, y_axis_symmetrical=False)
+        check(F.tanh, F.atanh, y_axis_symmetrical=False)
+
+    def test_reciprocal_trig_functions(self):
+        # SPARK-36683: Tests for reciprocal trig functions (SEC, CSC and COT)
+        lst = [
+            0.0,
+            math.pi / 6,
+            math.pi / 4,
+            math.pi / 3,
+            math.pi / 2,
+            math.pi,
+            3 * math.pi / 2,
+            2 * math.pi,
+        ]
+
+        df = self.spark.createDataFrame(lst, types.DoubleType())
+
+        def to_reciprocal_trig(func):
+            return [1.0 / func(i) if func(i) != 0 else math.inf for i in lst]
+
+        SQLTestUtils.assert_close(
+            to_reciprocal_trig(math.cos), df.select(F.sec(df.value)).collect()
+        )
+        SQLTestUtils.assert_close(
+            to_reciprocal_trig(math.sin), df.select(F.csc(df.value)).collect()
+        )
+        SQLTestUtils.assert_close(
+            to_reciprocal_trig(math.tan), df.select(F.cot(df.value)).collect()
+        )
+
+    def test_rand_functions(self):
+        df = self.spark.createDataFrame([Row(key=i, value=str(i)) for i in range(100)])
+
+        rnd = df.select("key", F.rand()).collect()
+        for row in rnd:
+            assert row[1] >= 0.0 and row[1] <= 1.0, "got: %s" % row[1]
+        rndn = df.select("key", F.randn(5)).collect()
+        for row in rndn:
+            assert row[1] >= -4.0 and row[1] <= 4.0, "got: %s" % row[1]
+
+        # If the specified seed is 0, we should use it.
+        # https://issues.apache.org/jira/browse/SPARK-9691
+        rnd1 = df.select("key", F.rand(0)).collect()
+        rnd2 = df.select("key", F.rand(0)).collect()
+        self.assertEqual(sorted(rnd1), sorted(rnd2))
+
+        rndn1 = df.select("key", F.randn(0)).collect()
+        rndn2 = df.select("key", F.randn(0)).collect()
+        self.assertEqual(sorted(rndn1), sorted(rndn2))
+
+    def test_string_functions(self):
+        string_functions = [
+            "upper",
+            "lower",
+            "ascii",
+            "base64",
+            "unbase64",
+            "ltrim",
+            "rtrim",
+            "trim",
+        ]
+
+        df = self.spark.createDataFrame([["nick"]], schema=["name"])
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.select(F.col("name").substr(0, F.lit(1)))
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_SAME_TYPE",
+            message_parameters={
+                "arg_name1": "startPos",
+                "arg_name2": "length",
+                "arg_type1": "int",
+                "arg_type2": "Column",
+            },
+        )
+
+        for name in string_functions:
+            self.assertEqual(
+                df.select(getattr(F, name)("name")).first()[0],
+                df.select(getattr(F, name)(F.col("name"))).first()[0],
             )
 
-        # multiple input model
-        def predict_batch2_fn():
-            def predict(in1, in2):
-                return {"a1": in1, "b1": in2}
-
-            return predict
-
-        identity2 = predict_batch_udf(
-            predict_batch2_fn,
-            return_type=StructType(
-                [StructField("a1", DoubleType(), True), StructField("b1", DoubleType(), True)]
-            ),
-            batch_size=5,
-        )
-
-        # multiple columns using struct, multiple inputs => multiple column output
-        preds = (
-            self.df.withColumn("preds", identity2(struct("a", "b")))
-            .select("a", "b", "preds.*")
-            .toPandas()
-        )
-        self.assertTrue(preds["a"].equals(preds["a1"]))
-        self.assertTrue(preds["b"].equals(preds["b1"]))
-
-        # multiple columns, multiple inputs => multiple column output
-        preds = (
-            self.df.withColumn("preds", identity2(col("a"), col("b")))
-            .select("a", "b", "preds.*")
-            .toPandas()
-        )
-        self.assertTrue(preds["a"].equals(preds["a1"]))
-        self.assertTrue(preds["b"].equals(preds["b1"]))
-
-        # multiple column input => multiple column output (str)
-        preds = (
-            self.df.withColumn("preds", identity2("a", "b")).select("a", "b", "preds.*").toPandas()
-        )
-        self.assertTrue(preds["a"].equals(preds["a1"]))
-        self.assertTrue(preds["b"].equals(preds["b1"]))
-
-    def test_batching(self):
-        batch_size = 10
-
-        def make_predict_fn():
-            def predict(inputs):
-                batch_size = len(inputs)
-                # just return the batch size as the "prediction"
-                outputs = [batch_size for i in inputs]
-                return np.array(outputs)
-
-            return predict
-
-        identity = predict_batch_udf(
-            make_predict_fn, return_type=IntegerType(), batch_size=batch_size
-        )
-
-        # struct
-        preds = self.df.withColumn("preds", identity(struct("a"))).toPandas()
-        batch_sizes = preds["preds"].to_numpy()
-        self.assertTrue(all(batch_sizes <= batch_size))
-
-        # col
-        preds = self.df.withColumn("preds", identity(col("a"))).toPandas()
-        batch_sizes = preds["preds"].to_numpy()
-        self.assertTrue(all(batch_sizes <= batch_size))
-
-        # struct
-        preds = self.df.withColumn("preds", identity("a")).toPandas()
-        batch_sizes = preds["preds"].to_numpy()
-        self.assertTrue(all(batch_sizes <= batch_size))
-
-    def test_caching(self):
-        def make_predict_fn():
-            # emulate loading a model, this should only be invoked once (per worker process)
-            fake_output = np.random.random()
-
-            def predict(inputs):
-                return np.array([fake_output for i in inputs])
-
-            return predict
-
-        identity = predict_batch_udf(make_predict_fn, return_type=DoubleType(), batch_size=5)
-
-        # results should be the same
-        df1 = self.df.withColumn("preds", identity(struct("a"))).toPandas()
-        df2 = self.df.withColumn("preds", identity(struct("a"))).toPandas()
-        self.assertTrue(df1.equals(df2))
-
-        identity = predict_batch_udf(make_predict_fn, return_type=DoubleType(), batch_size=5)
-
-        # cache should now be invalidated and results should be different
-        df3 = self.df.withColumn("preds", identity(struct("a"))).toPandas()
-        self.assertFalse(df1.equals(df3))
-
-    def test_transform_scalar(self):
-        columns = self.df.columns
-
-        # multiple scalar columns, single input, no input_tensor_shapes => single numpy array
-        def array_sum_fn():
-            def predict(inputs):
-                return np.sum(inputs, axis=1)
-
-            return predict
-
-        sum_cols = predict_batch_udf(array_sum_fn, return_type=DoubleType(), batch_size=5)
-        preds = self.df.withColumn("preds", sum_cols(struct(*columns))).toPandas()
-        self.assertTrue(np.array_equal(np.sum(self.data, axis=1), preds["preds"].to_numpy()))
-
-        with self.assertRaisesRegex(Exception, "Multiple input columns found, but model expected"):
-            preds = self.df.withColumn("preds", sum_cols(*[col(c) for c in columns])).toPandas()
-
-        with self.assertRaisesRegex(Exception, "Multiple input columns found, but model expected"):
-            preds = self.df.withColumn("preds", sum_cols(*columns)).toPandas()
-
-        # multiple scalar columns, multiple inputs, no input_tensor_shapes => list of numpy arrays
-        def list_sum_fn():
-            def predict(a, b, c, d):
-                result = sum([a, b, c, d])
-                return result
-
-            return predict
-
-        sum_cols = predict_batch_udf(list_sum_fn, return_type=DoubleType(), batch_size=5)
-        preds = self.df.withColumn("preds", sum_cols(*columns)).toPandas()
-        self.assertTrue(np.array_equal(np.sum(self.data, axis=1), preds["preds"].to_numpy()))
-
-        # multiple scalar columns, mismatched inputs, no input_tensor_shapes  => ERROR
-        def list_sum_fn():
-            def predict(a, b, c):
-                result = sum([a, b, c])
-                return result
-
-            return predict
-
-        sum_cols = predict_batch_udf(list_sum_fn, return_type=DoubleType(), batch_size=5)
-        with self.assertRaisesRegex(Exception, "Model expected 3 inputs, but received 4 columns"):
-            preds = self.df.withColumn("preds", sum_cols(*columns)).toPandas()
-
-        # muliple scalar columns with one tensor_input_shape => single numpy array
-        sum_cols = predict_batch_udf(
-            array_sum_fn, return_type=DoubleType(), batch_size=5, input_tensor_shapes=[[4]]
-        )
-        preds = self.df.withColumn("preds", sum_cols(struct(*columns))).toPandas()
-        self.assertTrue(np.array_equal(np.sum(self.data, axis=1), preds["preds"].to_numpy()))
-
-        # muliple scalar columns with wrong tensor_input_shape => ERROR
-        sum_cols = predict_batch_udf(
-            array_sum_fn, return_type=DoubleType(), batch_size=5, input_tensor_shapes=[[3]]
-        )
-        with self.assertRaisesRegex(Exception, "Input data does not match expected shape."):
-            self.df.withColumn("preds", sum_cols(struct(*columns))).toPandas()
-
-        # scalar columns with multiple tensor_input_shapes => ERROR
-        sum_cols = predict_batch_udf(
-            array_sum_fn,
-            return_type=DoubleType(),
-            batch_size=5,
-            input_tensor_shapes=[[4], [4]],
-        )
-        with self.assertRaisesRegex(Exception, "Multiple input_tensor_shapes found"):
-            self.df.withColumn("preds", sum_cols(struct(*columns))).toPandas()
-
-    def test_transform_single_tensor(self):
-        columns1 = self.df_tensor1.columns
-
-        def array_sum_fn():
-            def predict(inputs):
-                return np.sum(inputs, axis=1)
-
-            return predict
-
-        # tensor column with no input_tensor_shapes => ERROR
-        sum_cols = predict_batch_udf(array_sum_fn, return_type=DoubleType(), batch_size=5)
-        with self.assertRaisesRegex(Exception, "Tensor columns require input_tensor_shapes"):
-            preds = self.df_tensor1.withColumn("preds", sum_cols(struct(*columns1))).toPandas()
-
-        # tensor column with tensor_input_shapes => single numpy array
-        sum_cols = predict_batch_udf(
-            array_sum_fn, return_type=DoubleType(), batch_size=5, input_tensor_shapes=[[4]]
-        )
-        preds = self.df_tensor1.withColumn("preds", sum_cols(struct(*columns1))).toPandas()
-        self.assertTrue(np.array_equal(np.sum(self.data, axis=1), preds["preds"].to_numpy()))
-
-        # tensor column with multiple tensor_input_shapes => ERROR
-        sum_cols = predict_batch_udf(
-            array_sum_fn,
-            return_type=DoubleType(),
-            batch_size=5,
-            input_tensor_shapes=[[4], [3]],
-        )
-        with self.assertRaisesRegex(Exception, "Multiple input_tensor_shapes found"):
-            preds = self.df_tensor1.withColumn("preds", sum_cols(struct(*columns1))).toPandas()
-
-    def test_transform_multi_tensor(self):
-        def multi_sum_fn():
-            def predict(t1, t2):
-                result = np.sum(t1, axis=1) + np.sum(t2, axis=1)
-                return result
-
-            return predict
-
-        # multiple tensor columns with tensor_input_shapes => list of numpy arrays
-        sum_cols = predict_batch_udf(
-            multi_sum_fn,
-            return_type=DoubleType(),
-            batch_size=5,
-            input_tensor_shapes=[[4], [3]],
-        )
-        preds = self.df_tensor2.withColumn("preds", sum_cols("t1", "t2")).toPandas()
-        self.assertTrue(
-            np.array_equal(
-                np.sum(self.data, axis=1) + np.sum(self.data[:, 0:3], axis=1),
-                preds["preds"].to_numpy(),
-            )
-        )
-
-    def test_mixed_input_shapes(self):
-        def mixed_sum_fn():
-            # 4 scalars + 1 tensor
-            def predict(a, b, c, d, t1):
-                result = a + b + c + d + np.sum(t1, axis=1)
-                return result
-
-            return predict
-
-        # dense input_tensor_shapes
-        sum_cols = predict_batch_udf(
-            mixed_sum_fn,
-            return_type=DoubleType(),
-            batch_size=5,
-            input_tensor_shapes=[None, None, None, None, [4]],
-        )
-
-        preds = self.df_scalar_tensor.withColumn(
-            "preds", sum_cols("a", "b", "c", "d", "t1")
-        ).toPandas()
-
-        self.assertTrue(
-            np.array_equal(
-                np.sum(self.data, axis=1) * 2,
-                preds["preds"].to_numpy(),
-            )
-        )
-
-        # sparse input_tensor_shapes
-        sum_cols = predict_batch_udf(
-            mixed_sum_fn,
-            return_type=DoubleType(),
-            batch_size=5,
-            input_tensor_shapes={4: [4]},
-        )
-
-        preds = self.df_scalar_tensor.withColumn(
-            "preds", sum_cols("a", "b", "c", "d", "t1")
-        ).toPandas()
-
-        self.assertTrue(
-            np.array_equal(
-                np.sum(self.data, axis=1) * 2,
-                preds["preds"].to_numpy(),
-            )
-        )
-
-    def test_return_multiple(self):
-        # columnar form (dictionary of numpy arrays)
-        def multiples_column_fn():
-            def predict(inputs):
-                return {"x2": inputs * 2, "x3": inputs * 3}
-
-            return predict
-
-        multiples_col = predict_batch_udf(
-            multiples_column_fn,
-            return_type=StructType(
-                [StructField("x2", DoubleType(), True), StructField("x3", DoubleType(), True)]
-            ),
-            batch_size=5,
-        )
-        preds = self.df.withColumn("preds", multiples_col("a")).select("a", "preds.*").toPandas()
-
-        self.assertTrue(np.array_equal(self.data[:, 0] * 2, preds["x2"].to_numpy()))
-        self.assertTrue(np.array_equal(self.data[:, 0] * 3, preds["x3"].to_numpy()))
-
-        # row form: list of dictionaries
-        def multiples_row_fn():
-            def predict(inputs):
-                return [{"x2": x * 2, "x3": x * 3} for x in inputs]
-
-            return predict
-
-        multiples_row = predict_batch_udf(
-            multiples_row_fn,
-            return_type=StructType(
-                [StructField("x2", DoubleType(), True), StructField("x3", DoubleType(), True)]
-            ),
-            batch_size=5,
-        )
-        preds = self.df.withColumn("preds", multiples_row("a")).select("a", "preds.*").toPandas()
-
-        self.assertTrue(np.array_equal(self.data[:, 0] * 2, preds["x2"].to_numpy()))
-        self.assertTrue(np.array_equal(self.data[:, 0] * 3, preds["x3"].to_numpy()))
-
-    def test_return_struct_with_array_field(self):
-        # column form
-        def multiples_with_array_fn():
-            def predict(x, y):
-                return {"x2": x * 2, "y3": y * 3}
-
-            return predict
-
-        multiples_w_array = predict_batch_udf(
-            multiples_with_array_fn,
-            return_type=StructType(
-                [
-                    StructField("x2", DoubleType(), True),
-                    StructField("y3", ArrayType(DoubleType()), True),
-                ]
-            ),
-            input_tensor_shapes=[[], [3]],
-            batch_size=5,
-        )
-        preds = (
-            self.df.withColumn("preds", multiples_w_array("a", array(["b", "c", "d"])))
-            .select("a", "preds.*")
-            .toPandas()
-        )
-
-        self.assertTrue(np.array_equal(self.data[:, 0] * 2, np.array(preds["x2"])))
-        self.assertTrue(np.array_equal(self.data[:, 1:4] * 3, np.vstack(preds["y3"])))
-
-        # row form: list of dictionaries
-        def multiples_row_array_fn():
-            def predict(x, y):
-                return [{"x2": x * 2, "y3": y * 3} for x, y in zip(x, y)]
-
-            return predict
-
-        multiples_row_array = predict_batch_udf(
-            multiples_row_array_fn,
-            return_type=StructType(
-                [
-                    StructField("x2", DoubleType(), True),
-                    StructField("y3", ArrayType(DoubleType()), True),
-                ]
-            ),
-            input_tensor_shapes=[[], [3]],
-            batch_size=5,
-        )
-
-        preds = (
-            self.df.withColumn("preds", multiples_row_array("a", array(["b", "c", "d"])))
-            .select("a", "preds.*")
-            .toPandas()
-        )
-
-        self.assertTrue(np.array_equal(self.data[:, 0] * 2, np.array(preds["x2"])))
-        self.assertTrue(np.array_equal(self.data[:, 1:4] * 3, np.vstack(preds["y3"])))
-
-        # row form: list of dictionaries, malformed array
-        def multiples_row_array_fn():
-            def predict(x, y):
-                return [{"x2": x * 2, "y3": np.reshape(y, (-1, 1)) * 3} for x, y in zip(x, y)]
-
-            return predict
-
-        multiples_row_array = predict_batch_udf(
-            multiples_row_array_fn,
-            return_type=StructType(
-                [
-                    StructField("x2", DoubleType(), True),
-                    StructField("y3", ArrayType(DoubleType()), True),
-                ]
-            ),
-            input_tensor_shapes=[[], [3]],
-            batch_size=5,
-        )
-        with self.assertRaisesRegex(Exception, "must be one-dimensional"):
-            preds = (
-                self.df.withColumn("preds", multiples_row_array("a", array(["b", "c", "d"])))
-                .select("a", "preds.*")
-                .toPandas()
-            )
-
-    def test_single_value_in_batch(self):
-        # SPARK-42250: batches consisting of single float value should work
+    def test_octet_length_function(self):
+        # SPARK-36751: add octet length api for python
+        df = self.spark.createDataFrame([("cat",), ("\U0001F408",)], ["cat"])
+        actual = df.select(F.octet_length("cat")).collect()
+        self.assertEqual([Row(3), Row(4)], actual)
+
+    def test_bit_length_function(self):
+        # SPARK-36751: add bit length api for python
+        df = self.spark.createDataFrame([("cat",), ("\U0001F408",)], ["cat"])
+        actual = df.select(F.bit_length("cat")).collect()
+        self.assertEqual([Row(24), Row(32)], actual)
+
+    def test_array_contains_function(self):
+        df = self.spark.createDataFrame([(["1", "2", "3"],), ([],)], ["data"])
+        actual = df.select(F.array_contains(df.data, "1").alias("b")).collect()
+        self.assertEqual([Row(b=True), Row(b=False)], actual)
+
+    def test_between_function(self):
         df = self.spark.createDataFrame(
-            [[[0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 2.0]]], schema=["t1", "t2"]
+            [Row(a=1, b=2, c=3), Row(a=2, b=1, c=3), Row(a=4, b=1, c=4)]
+        )
+        self.assertEqual(
+            [Row(a=2, b=1, c=3), Row(a=4, b=1, c=4)], df.filter(df.a.between(df.b, df.c)).collect()
         )
 
-        def make_multi_sum_fn():
-            def predict(x1: np.ndarray, x2: np.ndarray) -> np.ndarray:
-                return np.sum(x1, axis=1) + np.sum(x2, axis=1)
+    def test_dayofweek(self):
+        dt = datetime.datetime(2017, 11, 6)
+        df = self.spark.createDataFrame([Row(date=dt)])
+        row = df.select(F.dayofweek(df.date)).first()
+        self.assertEqual(row[0], 2)
 
-            return predict
+    # Test added for SPARK-37738; change Python API to accept both col & int as input
+    def test_date_add_function(self):
+        dt = datetime.date(2021, 12, 27)
 
-        multi_sum_udf = predict_batch_udf(
-            make_multi_sum_fn,
-            return_type=FloatType(),
-            batch_size=1,
-            input_tensor_shapes=[[4], [3]],
+        # Note; number var in Python gets converted to LongType column;
+        # this is not supported by the function, so cast to Integer explicitly
+        df = self.spark.createDataFrame([Row(date=dt, add=2)], "date date, add integer")
+
+        self.assertTrue(
+            all(
+                df.select(
+                    F.date_add(df.date, df.add) == datetime.date(2021, 12, 29),
+                    F.date_add(df.date, "add") == datetime.date(2021, 12, 29),
+                    F.date_add(df.date, 3) == datetime.date(2021, 12, 30),
+                ).first()
+            )
         )
 
-        [value] = df.select(multi_sum_udf("t1", "t2")).first()
-        self.assertEqual(value, 9.0)
+    # Test added for SPARK-37738; change Python API to accept both col & int as input
+    def test_date_sub_function(self):
+        dt = datetime.date(2021, 12, 27)
+
+        # Note; number var in Python gets converted to LongType column;
+        # this is not supported by the function, so cast to Integer explicitly
+        df = self.spark.createDataFrame([Row(date=dt, sub=2)], "date date, sub integer")
+
+        self.assertTrue(
+            all(
+                df.select(
+                    F.date_sub(df.date, df.sub) == datetime.date(2021, 12, 25),
+                    F.date_sub(df.date, "sub") == datetime.date(2021, 12, 25),
+                    F.date_sub(df.date, 3) == datetime.date(2021, 12, 24),
+                ).first()
+            )
+        )
+
+    # Test added for SPARK-37738; change Python API to accept both col & int as input
+    def test_add_months_function(self):
+        dt = datetime.date(2021, 12, 27)
+
+        # Note; number in Python gets converted to LongType column;
+        # this is not supported by the function, so cast to Integer explicitly
+        df = self.spark.createDataFrame([Row(date=dt, add=2)], "date date, add integer")
+
+        self.assertTrue(
+            all(
+                df.select(
+                    F.add_months(df.date, df.add) == datetime.date(2022, 2, 27),
+                    F.add_months(df.date, "add") == datetime.date(2022, 2, 27),
+                    F.add_months(df.date, 3) == datetime.date(2022, 3, 27),
+                ).first()
+            )
+        )
+
+    def test_make_date(self):
+        # SPARK-36554: expose make_date expression
+        df = self.spark.createDataFrame([(2020, 6, 26)], ["Y", "M", "D"])
+        row_from_col = df.select(F.make_date(df.Y, df.M, df.D)).first()
+        self.assertEqual(row_from_col[0], datetime.date(2020, 6, 26))
+        row_from_name = df.select(F.make_date("Y", "M", "D")).first()
+        self.assertEqual(row_from_name[0], datetime.date(2020, 6, 26))
+
+    def test_expr(self):
+        row = Row(a="length string", b=75)
+        df = self.spark.createDataFrame([row])
+        result = df.select(F.expr("length(a)")).collect()[0].asDict()
+        self.assertEqual(13, result["length(a)"])
+
+    # add test for SPARK-10577 (test broadcast join hint)
+    def test_functions_broadcast(self):
+        df1 = self.spark.createDataFrame([(1, "1"), (2, "2")], ("key", "value"))
+        df2 = self.spark.createDataFrame([(1, "1"), (2, "2")], ("key", "value"))
+
+        # equijoin - should be converted into broadcast join
+        with io.StringIO() as buf, redirect_stdout(buf):
+            df1.join(F.broadcast(df2), "key").explain(True)
+            self.assertGreaterEqual(buf.getvalue().count("Broadcast"), 1)
+
+        # no join key -- should not be a broadcast join
+        with io.StringIO() as buf, redirect_stdout(buf):
+            df1.crossJoin(F.broadcast(df2)).explain(True)
+            self.assertGreaterEqual(buf.getvalue().count("Broadcast"), 1)
+
+        # planner should not crash without a join
+        F.broadcast(df1).explain(True)
+
+    def test_first_last_ignorenulls(self):
+        df = self.spark.range(0, 100)
+        df2 = df.select(F.when(df.id % 3 == 0, None).otherwise(df.id).alias("id"))
+        df3 = df2.select(
+            F.first(df2.id, False).alias("a"),
+            F.first(df2.id, True).alias("b"),
+            F.last(df2.id, False).alias("c"),
+            F.last(df2.id, True).alias("d"),
+        )
+        self.assertEqual([Row(a=None, b=1, c=None, d=98)], df3.collect())
+
+    def test_approxQuantile(self):
+        df = self.spark.createDataFrame([Row(a=i, b=i + 10) for i in range(10)])
+        for f in ["a", "a"]:
+            aq = df.stat.approxQuantile(f, [0.1, 0.5, 0.9], 0.1)
+            self.assertTrue(isinstance(aq, list))
+            self.assertEqual(len(aq), 3)
+        self.assertTrue(all(isinstance(q, float) for q in aq))
+        aqs = df.stat.approxQuantile(["a", "b"], [0.1, 0.5, 0.9], 0.1)
+        self.assertTrue(isinstance(aqs, list))
+        self.assertEqual(len(aqs), 2)
+        self.assertTrue(isinstance(aqs[0], list))
+        self.assertEqual(len(aqs[0]), 3)
+        self.assertTrue(all(isinstance(q, float) for q in aqs[0]))
+        self.assertTrue(isinstance(aqs[1], list))
+        self.assertEqual(len(aqs[1]), 3)
+        self.assertTrue(all(isinstance(q, float) for q in aqs[1]))
+        aqt = df.stat.approxQuantile(("a", "b"), [0.1, 0.5, 0.9], 0.1)
+        self.assertTrue(isinstance(aqt, list))
+        self.assertEqual(len(aqt), 2)
+        self.assertTrue(isinstance(aqt[0], list))
+        self.assertEqual(len(aqt[0]), 3)
+        self.assertTrue(all(isinstance(q, float) for q in aqt[0]))
+        self.assertTrue(isinstance(aqt[1], list))
+        self.assertEqual(len(aqt[1]), 3)
+        self.assertTrue(all(isinstance(q, float) for q in aqt[1]))
+        self.assertRaises(TypeError, lambda: df.stat.approxQuantile(123, [0.1, 0.9], 0.1))
+        self.assertRaises(TypeError, lambda: df.stat.approxQuantile(("a", 123), [0.1, 0.9], 0.1))
+        self.assertRaises(TypeError, lambda: df.stat.approxQuantile(["a", 123], [0.1, 0.9], 0.1))
+
+    def test_sorting_functions_with_column(self):
+        self.check_sorting_functions_with_column(Column)
+
+    def check_sorting_functions_with_column(self, tpe):
+        funs = [F.asc_nulls_first, F.asc_nulls_last, F.desc_nulls_first, F.desc_nulls_last]
+        exprs = [F.col("x"), "x"]
+
+        for fun in funs:
+            for _expr in exprs:
+                res = fun(_expr)
+                self.assertIsInstance(res, tpe)
+                self.assertIn(f"""'x {fun.__name__.replace("_", " ").upper()}'""", str(res))
+
+        for _expr in exprs:
+            res = F.asc(_expr)
+            self.assertIsInstance(res, tpe)
+            self.assertIn("""'x ASC NULLS FIRST'""", str(res))
+
+        for _expr in exprs:
+            res = F.desc(_expr)
+            self.assertIsInstance(res, tpe)
+            self.assertIn("""'x DESC NULLS LAST'""", str(res))
+
+    def test_sort_with_nulls_order(self):
+        df = self.spark.createDataFrame(
+            [("Tom", 80), (None, 60), ("Alice", 50)], ["name", "height"]
+        )
+        self.assertEqual(
+            df.select(df.name).orderBy(F.asc_nulls_first("name")).collect(),
+            [Row(name=None), Row(name="Alice"), Row(name="Tom")],
+        )
+        self.assertEqual(
+            df.select(df.name).orderBy(F.asc_nulls_last("name")).collect(),
+            [Row(name="Alice"), Row(name="Tom"), Row(name=None)],
+        )
+        self.assertEqual(
+            df.select(df.name).orderBy(F.desc_nulls_first("name")).collect(),
+            [Row(name=None), Row(name="Tom"), Row(name="Alice")],
+        )
+        self.assertEqual(
+            df.select(df.name).orderBy(F.desc_nulls_last("name")).collect(),
+            [Row(name="Tom"), Row(name="Alice"), Row(name=None)],
+        )
+
+    def test_input_file_name_reset_for_rdd(self):
+        rdd = self.sc.textFile("python/test_support/hello/hello.txt").map(lambda x: {"data": x})
+        df = self.spark.createDataFrame(rdd, "data STRING")
+        df.select(F.input_file_name().alias("file")).collect()
+
+        non_file_df = self.spark.range(100).select(F.input_file_name())
+
+        results = non_file_df.collect()
+        self.assertTrue(len(results) == 100)
+
+        # [SPARK-24605]: if everything was properly reset after the last job, this should return
+        # empty string rather than the file read in the last job.
+        for result in results:
+            self.assertEqual(result[0], "")
+
+    def test_slice(self):
+        df = self.spark.createDataFrame(
+            [
+                (
+                    [1, 2, 3],
+                    2,
+                    2,
+                ),
+                (
+                    [4, 5],
+                    2,
+                    2,
+                ),
+            ],
+            ["x", "index", "len"],
+        )
+
+        expected = [Row(sliced=[2, 3]), Row(sliced=[5])]
+        self.assertEqual(df.select(F.slice(df.x, 2, 2).alias("sliced")).collect(), expected)
+        self.assertEqual(
+            df.select(F.slice(df.x, F.lit(2), F.lit(2)).alias("sliced")).collect(), expected
+        )
+        self.assertEqual(
+            df.select(F.slice("x", "index", "len").alias("sliced")).collect(), expected
+        )
+
+        self.assertEqual(
+            df.select(F.slice(df.x, F.size(df.x) - 1, F.lit(1)).alias("sliced")).collect(),
+            [Row(sliced=[2]), Row(sliced=[4])],
+        )
+        self.assertEqual(
+            df.select(F.slice(df.x, F.lit(1), F.size(df.x) - 1).alias("sliced")).collect(),
+            [Row(sliced=[1, 2]), Row(sliced=[4])],
+        )
+
+    def test_array_repeat(self):
+        df = self.spark.range(1)
+        df = df.withColumn("repeat_n", F.lit(3))
+
+        expected = [Row(val=[0, 0, 0])]
+        self.assertEqual(df.select(F.array_repeat("id", 3).alias("val")).collect(), expected)
+        self.assertEqual(df.select(F.array_repeat("id", F.lit(3)).alias("val")).collect(), expected)
+        self.assertEqual(
+            df.select(F.array_repeat("id", "repeat_n").alias("val")).collect(), expected
+        )
+
+    def test_input_file_name_udf(self):
+        df = self.spark.read.text("python/test_support/hello/hello.txt")
+        df = df.select(F.udf(lambda x: x)("value"), F.input_file_name().alias("file"))
+        file_name = df.collect()[0].file
+        self.assertTrue("python/test_support/hello/hello.txt" in file_name)
+
+    def test_least(self):
+        df = self.spark.createDataFrame([(1, 4, 3)], ["a", "b", "c"])
+
+        expected = [Row(least=1)]
+        self.assertEqual(df.select(F.least(df.a, df.b, df.c).alias("least")).collect(), expected)
+        self.assertEqual(
+            df.select(F.least(F.lit(3), F.lit(5), F.lit(1)).alias("least")).collect(), expected
+        )
+        self.assertEqual(df.select(F.least("a", "b", "c").alias("least")).collect(), expected)
+
+        with self.assertRaises(PySparkValueError) as pe:
+            df.select(F.least(df.a).alias("least")).collect()
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="WRONG_NUM_COLUMNS",
+            message_parameters={"func_name": "least", "num_cols": "2"},
+        )
+
+    def test_overlay(self):
+        actual = list(
+            chain.from_iterable(
+                [
+                    re.findall("(overlay\\(.*\\))", str(x))
+                    for x in [
+                        F.overlay(F.col("foo"), F.col("bar"), 1),
+                        F.overlay("x", "y", 3),
+                        F.overlay(F.col("x"), F.col("y"), 1, 3),
+                        F.overlay("x", "y", 2, 5),
+                        F.overlay("x", "y", F.lit(11)),
+                        F.overlay("x", "y", F.lit(2), F.lit(5)),
+                    ]
+                ]
+            )
+        )
+
+        expected = [
+            "overlay(foo, bar, 1, -1)",
+            "overlay(x, y, 3, -1)",
+            "overlay(x, y, 1, 3)",
+            "overlay(x, y, 2, 5)",
+            "overlay(x, y, 11, -1)",
+            "overlay(x, y, 2, 5)",
+        ]
+
+        self.assertListEqual(actual, expected)
+
+        df = self.spark.createDataFrame([("SPARK_SQL", "CORE", 7, 0)], ("x", "y", "pos", "len"))
+
+        exp = [Row(ol="SPARK_CORESQL")]
+        self.assertEqual(df.select(F.overlay(df.x, df.y, 7, 0).alias("ol")).collect(), exp)
+        self.assertEqual(
+            df.select(F.overlay(df.x, df.y, F.lit(7), F.lit(0)).alias("ol")).collect(), exp
+        )
+        self.assertEqual(df.select(F.overlay("x", "y", "pos", "len").alias("ol")).collect(), exp)
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.select(F.overlay(df.x, df.y, 7.5, 0).alias("ol")).collect()
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_INT_OR_STR",
+            message_parameters={"arg_name": "pos", "arg_type": "float"},
+        )
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.select(F.overlay(df.x, df.y, 7, 0.5).alias("ol")).collect()
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_INT_OR_STR",
+            message_parameters={"arg_name": "len", "arg_type": "float"},
+        )
+
+    def test_percentile_approx(self):
+        actual = list(
+            chain.from_iterable(
+                [
+                    re.findall("(percentile_approx\\(.*\\))", str(x))
+                    for x in [
+                        F.percentile_approx(F.col("foo"), F.lit(0.5)),
+                        F.percentile_approx(F.col("bar"), 0.25, 42),
+                        F.percentile_approx(F.col("bar"), [0.25, 0.5, 0.75]),
+                        F.percentile_approx(F.col("foo"), (0.05, 0.95), 100),
+                        F.percentile_approx("foo", 0.5),
+                        F.percentile_approx("bar", [0.1, 0.9], F.lit(10)),
+                    ]
+                ]
+            )
+        )
+
+        expected = [
+            "percentile_approx(foo, 0.5, 10000)",
+            "percentile_approx(bar, 0.25, 42)",
+            "percentile_approx(bar, array(0.25, 0.5, 0.75), 10000)",
+            "percentile_approx(foo, array(0.05, 0.95), 100)",
+            "percentile_approx(foo, 0.5, 10000)",
+            "percentile_approx(bar, array(0.1, 0.9), 10)",
+        ]
+
+        self.assertListEqual(actual, expected)
+
+    def test_nth_value(self):
+        df = self.spark.createDataFrame(
+            [
+                ("a", 0, None),
+                ("a", 1, "x"),
+                ("a", 2, "y"),
+                ("a", 3, "z"),
+                ("a", 4, None),
+                ("b", 1, None),
+                ("b", 2, None),
+            ],
+            schema=("key", "order", "value"),
+        )
+        w = Window.partitionBy("key").orderBy("order")
+
+        rs = df.select(
+            df.key,
+            df.order,
+            F.nth_value("value", 2).over(w),
+            F.nth_value("value", 2, False).over(w),
+            F.nth_value("value", 2, True).over(w),
+        ).collect()
+
+        expected = [
+            ("a", 0, None, None, None),
+            ("a", 1, "x", "x", None),
+            ("a", 2, "x", "x", "y"),
+            ("a", 3, "x", "x", "y"),
+            ("a", 4, "x", "x", "y"),
+            ("b", 1, None, None, None),
+            ("b", 2, None, None, None),
+        ]
+
+        for r, ex in zip(sorted(rs), sorted(expected)):
+            self.assertEqual(tuple(r), ex[: len(r)])
+
+    def test_higher_order_function_failures(self):
+        # Should fail with varargs
+        with self.assertRaises(PySparkValueError) as pe:
+            F.transform(F.col("foo"), lambda *x: F.lit(1))
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION",
+            message_parameters={"func_name": "<lambda>"},
+        )
+
+        # Should fail with kwargs
+        with self.assertRaises(PySparkValueError) as pe:
+            F.transform(F.col("foo"), lambda **x: F.lit(1))
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION",
+            message_parameters={"func_name": "<lambda>"},
+        )
+
+        # Should fail with nullary function
+        with self.assertRaises(PySparkValueError) as pe:
+            F.transform(F.col("foo"), lambda: F.lit(1))
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION",
+            message_parameters={"func_name": "<lambda>", "num_args": "0"},
+        )
+
+        # Should fail with quaternary function
+        with self.assertRaises(PySparkValueError) as pe:
+            F.transform(F.col("foo"), lambda x1, x2, x3, x4: F.lit(1))
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION",
+            message_parameters={"func_name": "<lambda>", "num_args": "4"},
+        )
+
+        # Should fail if function doesn't return Column
+        with self.assertRaises(PySparkValueError) as pe:
+            F.transform(F.col("foo"), lambda x: 1)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="HIGHER_ORDER_FUNCTION_SHOULD_RETURN_COLUMN",
+            message_parameters={"func_name": "<lambda>", "return_type": "int"},
+        )
+
+    def test_nested_higher_order_function(self):
+        # SPARK-35382: lambda vars must be resolved properly in nested higher order functions
+        df = self.spark.sql("SELECT array(1, 2, 3) as numbers, array('a', 'b', 'c') as letters")
+
+        actual = df.select(
+            F.flatten(
+                F.transform(
+                    "numbers",
+                    lambda number: F.transform(
+                        "letters", lambda letter: F.struct(number.alias("n"), letter.alias("l"))
+                    ),
+                )
+            )
+        ).first()[0]
+
+        expected = [
+            (1, "a"),
+            (1, "b"),
+            (1, "c"),
+            (2, "a"),
+            (2, "b"),
+            (2, "c"),
+            (3, "a"),
+            (3, "b"),
+            (3, "c"),
+        ]
+
+        self.assertEquals(actual, expected)
+
+    def test_window_functions(self):
+        df = self.spark.createDataFrame([(1, "1"), (2, "2"), (1, "2"), (1, "2")], ["key", "value"])
+        w = Window.partitionBy("value").orderBy("key")
+
+        sel = df.select(
+            df.value,
+            df.key,
+            F.max("key").over(w.rowsBetween(0, 1)),
+            F.min("key").over(w.rowsBetween(0, 1)),
+            F.count("key").over(w.rowsBetween(float("-inf"), float("inf"))),
+            F.row_number().over(w),
+            F.rank().over(w),
+            F.dense_rank().over(w),
+            F.ntile(2).over(w),
+        )
+        rs = sorted(sel.collect())
+        expected = [
+            ("1", 1, 1, 1, 1, 1, 1, 1, 1),
+            ("2", 1, 1, 1, 3, 1, 1, 1, 1),
+            ("2", 1, 2, 1, 3, 2, 1, 1, 1),
+            ("2", 2, 2, 2, 3, 3, 3, 2, 2),
+        ]
+        for r, ex in zip(rs, expected):
+            self.assertEqual(tuple(r), ex[: len(r)])
+
+    def test_window_functions_without_partitionBy(self):
+        df = self.spark.createDataFrame([(1, "1"), (2, "2"), (1, "2"), (1, "2")], ["key", "value"])
+        w = Window.orderBy("key", df.value)
+
+        sel = df.select(
+            df.value,
+            df.key,
+            F.max("key").over(w.rowsBetween(0, 1)),
+            F.min("key").over(w.rowsBetween(0, 1)),
+            F.count("key").over(w.rowsBetween(float("-inf"), float("inf"))),
+            F.row_number().over(w),
+            F.rank().over(w),
+            F.dense_rank().over(w),
+            F.ntile(2).over(w),
+        )
+        rs = sorted(sel.collect())
+        expected = [
+            ("1", 1, 1, 1, 4, 1, 1, 1, 1),
+            ("2", 1, 1, 1, 4, 2, 2, 2, 1),
+            ("2", 1, 2, 1, 4, 3, 2, 2, 2),
+            ("2", 2, 2, 2, 4, 4, 4, 3, 2),
+        ]
+        for r, ex in zip(rs, expected):
+            self.assertEqual(tuple(r), ex[: len(r)])
+
+    def test_window_functions_cumulative_sum(self):
+        df = self.spark.createDataFrame([("one", 1), ("two", 2)], ["key", "value"])
+
+        # Test cumulative sum
+        sel = df.select(
+            df.key, F.sum(df.value).over(Window.rowsBetween(Window.unboundedPreceding, 0))
+        )
+        rs = sorted(sel.collect())
+        expected = [("one", 1), ("two", 3)]
+        for r, ex in zip(rs, expected):
+            self.assertEqual(tuple(r), ex[: len(r)])
+
+        # Test boundary values less than JVM's Long.MinValue and make sure we don't overflow
+        sel = df.select(
+            df.key, F.sum(df.value).over(Window.rowsBetween(Window.unboundedPreceding - 1, 0))
+        )
+        rs = sorted(sel.collect())
+        expected = [("one", 1), ("two", 3)]
+        for r, ex in zip(rs, expected):
+            self.assertEqual(tuple(r), ex[: len(r)])
+
+        # Test boundary values greater than JVM's Long.MaxValue and make sure we don't overflow
+        frame_end = Window.unboundedFollowing + 1
+        sel = df.select(
+            df.key, F.sum(df.value).over(Window.rowsBetween(Window.currentRow, frame_end))
+        )
+        rs = sorted(sel.collect())
+        expected = [("one", 3), ("two", 2)]
+        for r, ex in zip(rs, expected):
+            self.assertEqual(tuple(r), ex[: len(r)])
+
+    def test_window_time(self):
+        df = self.spark.createDataFrame(
+            [(datetime.datetime(2016, 3, 11, 9, 0, 7), 1)], ["date", "val"]
+        )
+
+        w = df.groupBy(F.window("date", "5 seconds")).agg(F.sum("val").alias("sum"))
+        r = w.select(
+            w.window.end.cast("string").alias("end"),
+            F.window_time(w.window).cast("string").alias("window_time"),
+            "sum",
+        ).collect()
+        self.assertEqual(
+            r[0], Row(end="2016-03-11 09:00:10", window_time="2016-03-11 09:00:09.999999", sum=1)
+        )
+
+    def test_collect_functions(self):
+        df = self.spark.createDataFrame([(1, "1"), (2, "2"), (1, "2"), (1, "2")], ["key", "value"])
+
+        self.assertEqual(sorted(df.select(F.collect_set(df.key).alias("r")).collect()[0].r), [1, 2])
+        self.assertEqual(
+            sorted(df.select(F.collect_list(df.key).alias("r")).collect()[0].r), [1, 1, 1, 2]
+        )
+        self.assertEqual(
+            sorted(df.select(F.collect_set(df.value).alias("r")).collect()[0].r), ["1", "2"]
+        )
+        self.assertEqual(
+            sorted(df.select(F.collect_list(df.value).alias("r")).collect()[0].r),
+            ["1", "2", "2", "2"],
+        )
+
+    def test_datetime_functions(self):
+        df = self.spark.range(1).selectExpr("'2017-01-22' as dateCol")
+        parse_result = df.select(F.to_date(F.col("dateCol"))).first()
+        self.assertEqual(datetime.date(2017, 1, 22), parse_result["to_date(dateCol)"])
+
+    def test_assert_true(self):
+        self.check_assert_true(Py4JJavaError)
+
+    def check_assert_true(self, tpe):
+        df = self.spark.range(3)
+
+        self.assertEqual(
+            df.select(F.assert_true(df.id < 3)).toDF("val").collect(),
+            [Row(val=None), Row(val=None), Row(val=None)],
+        )
+
+        with self.assertRaisesRegex(tpe, "too big"):
+            df.select(F.assert_true(df.id < 2, "too big")).toDF("val").collect()
+
+        with self.assertRaisesRegex(tpe, "2000000"):
+            df.select(F.assert_true(df.id < 2, df.id * 1e6)).toDF("val").collect()
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.select(F.assert_true(df.id < 2, 5))
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "errMsg", "arg_type": "int"},
+        )
+
+    def test_raise_error(self):
+        self.check_raise_error(Py4JJavaError)
+
+    def check_raise_error(self, tpe):
+        df = self.spark.createDataFrame([Row(id="foobar")])
+
+        with self.assertRaisesRegex(tpe, "foobar"):
+            df.select(F.raise_error(df.id)).collect()
+
+        with self.assertRaisesRegex(tpe, "barfoo"):
+            df.select(F.raise_error("barfoo")).collect()
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            df.select(F.raise_error(None))
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "errMsg", "arg_type": "NoneType"},
+        )
+
+    def test_sum_distinct(self):
+        self.spark.range(10).select(
+            F.assert_true(F.sum_distinct(F.col("id")) == F.sumDistinct(F.col("id")))
+        ).collect()
+
+    def test_shiftleft(self):
+        self.spark.range(10).select(
+            F.assert_true(F.shiftLeft(F.col("id"), 2) == F.shiftleft(F.col("id"), 2))
+        ).collect()
+
+    def test_shiftright(self):
+        self.spark.range(10).select(
+            F.assert_true(F.shiftRight(F.col("id"), 2) == F.shiftright(F.col("id"), 2))
+        ).collect()
+
+    def test_shiftrightunsigned(self):
+        self.spark.range(10).select(
+            F.assert_true(
+                F.shiftRightUnsigned(F.col("id"), 2) == F.shiftrightunsigned(F.col("id"), 2)
+            )
+        ).collect()
+
+    def test_lit_day_time_interval(self):
+        td = datetime.timedelta(days=1, hours=12, milliseconds=123)
+        actual = self.spark.range(1).select(F.lit(td)).first()[0]
+        self.assertEqual(actual, td)
+
+    def test_lit_list(self):
+        # SPARK-40271: added list type supporting
+        test_list = [1, 2, 3]
+        expected = [1, 2, 3]
+        actual = self.spark.range(1).select(F.lit(test_list)).first()[0]
+        self.assertEqual(actual, expected)
+
+        test_list = [[1, 2, 3], [3, 4]]
+        expected = [[1, 2, 3], [3, 4]]
+        actual = self.spark.range(1).select(F.lit(test_list)).first()[0]
+        self.assertEqual(actual, expected)
+
+        with self.sql_conf({"spark.sql.ansi.enabled": False}):
+            test_list = ["a", 1, None, 1.0]
+            expected = ["a", "1", None, "1.0"]
+            actual = self.spark.range(1).select(F.lit(test_list)).first()[0]
+            self.assertEqual(actual, expected)
+
+            test_list = [["a", 1, None, 1.0], [1, None, "b"]]
+            expected = [["a", "1", None, "1.0"], ["1", None, "b"]]
+            actual = self.spark.range(1).select(F.lit(test_list)).first()[0]
+            self.assertEqual(actual, expected)
+
+        df = self.spark.range(10)
+        with self.assertRaises(PySparkValueError) as pe:
+            F.lit([df.id, df.id])
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="COLUMN_IN_LIST",
+            message_parameters={"func_name": "lit"},
+        )
+
+    # Test added for SPARK-39832; change Python API to accept both col & str as input
+    def test_regexp_replace(self):
+        df = self.spark.createDataFrame(
+            [("100-200", r"(\d+)", "--")], ["str", "pattern", "replacement"]
+        )
+        self.assertTrue(
+            all(
+                df.select(
+                    F.regexp_replace("str", r"(\d+)", "--") == "-----",
+                    F.regexp_replace("str", F.col("pattern"), F.col("replacement")) == "-----",
+                ).first()
+            )
+        )
+
+    @unittest.skipIf(not have_numpy, "NumPy not installed")
+    def test_lit_np_scalar(self):
+        import numpy as np
+
+        dtype_to_spark_dtypes = [
+            (np.int8, [("1", "tinyint")]),
+            (np.int16, [("1", "smallint")]),
+            (np.int32, [("1", "int")]),
+            (np.int64, [("1", "bigint")]),
+            (np.float32, [("1.0", "float")]),
+            (np.float64, [("1.0", "double")]),
+            (np.bool_, [("true", "boolean")]),
+        ]
+        for dtype, spark_dtypes in dtype_to_spark_dtypes:
+            with self.subTest(dtype):
+                self.assertEqual(self.spark.range(1).select(F.lit(dtype(1))).dtypes, spark_dtypes)
+
+    @unittest.skipIf(not have_numpy, "NumPy not installed")
+    def test_np_scalar_input(self):
+        import numpy as np
+
+        df = self.spark.createDataFrame([([1, 2, 3],), ([],)], ["data"])
+        for dtype in [np.int8, np.int16, np.int32, np.int64]:
+            res = df.select(F.array_contains(df.data, dtype(1)).alias("b")).collect()
+            self.assertEqual([Row(b=True), Row(b=False)], res)
+            res = df.select(F.array_position(df.data, dtype(1)).alias("c")).collect()
+            self.assertEqual([Row(c=1), Row(c=0)], res)
+
+        df = self.spark.createDataFrame([([1.0, 2.0, 3.0],), ([],)], ["data"])
+        for dtype in [np.float32, np.float64]:
+            res = df.select(F.array_contains(df.data, dtype(1)).alias("b")).collect()
+            self.assertEqual([Row(b=True), Row(b=False)], res)
+            res = df.select(F.array_position(df.data, dtype(1)).alias("c")).collect()
+            self.assertEqual([Row(c=1), Row(c=0)], res)
+
+    @unittest.skipIf(not have_numpy, "NumPy not installed")
+    def test_ndarray_input(self):
+        import numpy as np
+
+        arr_dtype_to_spark_dtypes = [
+            ("int8", [("b", "array<smallint>")]),
+            ("int16", [("b", "array<smallint>")]),
+            ("int32", [("b", "array<int>")]),
+            ("int64", [("b", "array<bigint>")]),
+            ("float32", [("b", "array<float>")]),
+            ("float64", [("b", "array<double>")]),
+        ]
+        for t, expected_spark_dtypes in arr_dtype_to_spark_dtypes:
+            arr = np.array([1, 2]).astype(t)
+            self.assertEqual(
+                expected_spark_dtypes, self.spark.range(1).select(F.lit(arr).alias("b")).dtypes
+            )
+        arr = np.array([1, 2]).astype(np.uint)
+        with self.assertRaisesRegex(
+            TypeError, "The type of array scalar '%s' is not supported" % arr.dtype
+        ):
+            self.spark.range(1).select(F.lit(arr).alias("b"))
+
+    def test_binary_math_function(self):
+        funcs, expected = zip(
+            *[(F.atan2, 0.13664), (F.hypot, 8.07527), (F.pow, 2.14359), (F.pmod, 1.1)]
+        )
+        df = self.spark.range(1).select(*(func(1.1, 8) for func in funcs))
+        for a, e in zip(df.first(), expected):
+            self.assertAlmostEqual(a, e, 5)
+
+    def test_map_functions(self):
+        # SPARK-38496: Check basic functionality of all "map" type related functions
+        expected = {"a": 1, "b": 2}
+        expected2 = {"c": 3, "d": 4}
+        df = self.spark.createDataFrame(
+            [(list(expected.keys()), list(expected.values()))], ["k", "v"]
+        )
+        actual = (
+            df.select(
+                F.expr("map('c', 3, 'd', 4) as dict2"),
+                F.map_from_arrays(df.k, df.v).alias("dict"),
+                "*",
+            )
+            .select(
+                F.map_contains_key("dict", "a").alias("one"),
+                F.map_contains_key("dict", "d").alias("not_exists"),
+                F.map_keys("dict").alias("keys"),
+                F.map_values("dict").alias("values"),
+                F.map_entries("dict").alias("items"),
+                "*",
+            )
+            .select(
+                F.map_concat("dict", "dict2").alias("merged"),
+                F.map_from_entries(F.arrays_zip("keys", "values")).alias("from_items"),
+                "*",
+            )
+            .first()
+        )
+        self.assertEqual(expected, actual["dict"])
+        self.assertTrue(actual["one"])
+        self.assertFalse(actual["not_exists"])
+        self.assertEqual(list(expected.keys()), actual["keys"])
+        self.assertEqual(list(expected.values()), actual["values"])
+        self.assertEqual(expected, dict(actual["items"]))
+        self.assertEqual({**expected, **expected2}, dict(actual["merged"]))
+        self.assertEqual(expected, actual["from_items"])
+
+    def test_schema_of_json(self):
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.schema_of_json(1)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "json", "arg_type": "int"},
+        )
+
+    def test_schema_of_csv(self):
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.schema_of_csv(1)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "csv", "arg_type": "int"},
+        )
+
+    def test_from_csv(self):
+        df = self.spark.range(10)
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.from_csv(df.id, 1)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "schema", "arg_type": "int"},
+        )
+
+    def test_greatest(self):
+        df = self.spark.range(10)
+        with self.assertRaises(PySparkValueError) as pe:
+            F.greatest(df.id)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="WRONG_NUM_COLUMNS",
+            message_parameters={"func_name": "greatest", "num_cols": "2"},
+        )
+
+    def test_when(self):
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.when("id", 1)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN",
+            message_parameters={"arg_name": "condition", "arg_type": "str"},
+        )
+
+    def test_window(self):
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.window("date", 5)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_STR",
+            message_parameters={"arg_name": "windowDuration", "arg_type": "int"},
+        )
+
+    def test_session_window(self):
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.session_window("date", 5)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "gapDuration", "arg_type": "int"},
+        )
+
+    def test_bucket(self):
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.bucket("5", "id")
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_INT",
+            message_parameters={"arg_name": "numBuckets", "arg_type": "str"},
+        )
+
+
+class FunctionsTests(ReusedSQLTestCase, FunctionsTestsMixin):
+    pass
 
 
 if __name__ == "__main__":
-    from pyspark.ml.tests.test_functions import *  # noqa: F401
+    import unittest
+    from pyspark.sql.tests.test_functions import *  # noqa: F401
 
     try:
-        import xmlrunner  # type: ignore[import]
+        import xmlrunner
 
         testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
     except ImportError:
