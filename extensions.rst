@@ -16,22 +16,24 @@
     under the License.
 
 
-===================
-Pandas API on Spark
-===================
+.. _api.extensions:
 
-This page gives an overview of all public pandas API on Spark.
+==========
+Extensions
+==========
+.. currentmodule:: pyspark.pandas.extensions
 
-.. toctree::
-   :maxdepth: 2
+Accessors
+---------
 
-   io
-   general_functions
-   series
-   frame
-   indexing
-   window
-   groupby
-   resampling
-   ml
-   extensions
+Accessors can be written and registered with pandas-on-Spark Dataframes, Series, and
+Index objects. Accessors allow developers to extend the functionality of
+pandas-on-Spark objects seamlessly by writing arbitrary classes and methods which are
+then wrapped in one of the following decorators.
+
+.. autosummary::
+   :toctree: api/
+
+   register_dataframe_accessor
+   register_series_accessor
+   register_index_accessor
