@@ -14,210 +14,142 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import datetime
-from functools import partial
-from typing import Any, Optional, Union, cast, no_type_check
 
-import pandas as pd
-from pandas.api.types import is_hashable  # type: ignore[attr-defined]
+"""
+Date/Time related functions on pandas-on-Spark Series
+"""
+import warnings
+from typing import Any, Optional, Union, no_type_check
+
+import numpy as np
+import pandas as pd  # noqa: F401
 from pandas.tseries.offsets import DateOffset
-from pyspark._globals import _NoValue
 
-from pyspark import pandas as ps
-from pyspark.pandas.indexes.base import Index
-from pyspark.pandas.missing.indexes import MissingPandasLikeDatetimeIndex
-from pyspark.pandas.series import Series, first_series
-from pyspark.pandas.utils import verify_temp_column_name
+import pyspark.pandas as ps
+import pyspark.sql.functions as F
+from pyspark.sql.types import DateType, TimestampType, TimestampNTZType, LongType
 
 
-class DatetimeIndex(Index):
-    """
-    Immutable ndarray-like of datetime64 data.
+class DatetimeMethods:
+    """Date/Time methods for pandas-on-Spark Series"""
 
-    Parameters
-    ----------
-    data : array-like (1-dimensional), optional
-        Optional datetime-like data to construct index with.
-    freq : str or pandas offset object, optional
-        One of pandas date offset strings or corresponding objects. The string
-        'infer' can be passed in order to set the frequency of the index as the
-        inferred frequency upon creation.
-    normalize : bool, default False
-        Normalize start/end dates to midnight before generating date range.
-    closed : {'left', 'right'}, optional
-        Set whether to include `start` and `end` that are on the
-        boundary. The default includes boundary points on either end.
-    ambiguous : 'infer', bool-ndarray, 'NaT', default 'raise'
-        When clocks moved backward due to DST, ambiguous times may arise.
-        For example in Central European Time (UTC+01), when going from 03:00
-        DST to 02:00 non-DST, 02:30:00 local time occurs both at 00:30:00 UTC
-        and at 01:30:00 UTC. In such a situation, the `ambiguous` parameter
-        dictates how ambiguous times should be handled.
-
-        - 'infer' will attempt to infer fall dst-transition hours based on
-          order
-        - bool-ndarray where True signifies a DST time, False signifies a
-          non-DST time (note that this flag is only applicable for ambiguous
-          times)
-        - 'NaT' will return NaT where there are ambiguous times
-        - 'raise' will raise an AmbiguousTimeError if there are ambiguous times.
-    dayfirst : bool, default False
-        If True, parse dates in `data` with the day first order.
-    yearfirst : bool, default False
-        If True parse dates in `data` with the year first order.
-    dtype : numpy.dtype or str, default None
-        Note that the only NumPy dtype allowed is ‘datetime64[ns]’.
-    copy : bool, default False
-        Make a copy of input ndarray.
-    name : label, default None
-        Name to be stored in the index.
-
-    See Also
-    --------
-    Index : The base pandas Index type.
-    to_datetime : Convert argument to datetime.
-
-    Examples
-    --------
-    >>> ps.DatetimeIndex(['1970-01-01', '1970-01-01', '1970-01-01'])
-    DatetimeIndex(['1970-01-01', '1970-01-01', '1970-01-01'], dtype='datetime64[ns]', freq=None)
-
-    From a Series:
-
-    >>> from datetime import datetime
-    >>> s = ps.Series([datetime(2021, 3, 1), datetime(2021, 3, 2)], index=[10, 20])
-    >>> ps.DatetimeIndex(s)
-    DatetimeIndex(['2021-03-01', '2021-03-02'], dtype='datetime64[ns]', freq=None)
-
-    From an Index:
-
-    >>> idx = ps.DatetimeIndex(['1970-01-01', '1970-01-01', '1970-01-01'])
-    >>> ps.DatetimeIndex(idx)
-    DatetimeIndex(['1970-01-01', '1970-01-01', '1970-01-01'], dtype='datetime64[ns]', freq=None)
-    """
-
-    @no_type_check
-    def __new__(
-        cls,
-        data=None,
-        freq=_NoValue,
-        normalize=False,
-        closed=None,
-        ambiguous="raise",
-        dayfirst=False,
-        yearfirst=False,
-        dtype=None,
-        copy=False,
-        name=None,
-    ) -> "DatetimeIndex":
-        if not is_hashable(name):
-            raise TypeError("Index.name must be a hashable type")
-
-        if isinstance(data, (Series, Index)):
-            if dtype is None:
-                dtype = "datetime64[ns]"
-            return cast(DatetimeIndex, Index(data, dtype=dtype, copy=copy, name=name))
-
-        kwargs = dict(
-            data=data,
-            normalize=normalize,
-            closed=closed,
-            ambiguous=ambiguous,
-            dayfirst=dayfirst,
-            yearfirst=yearfirst,
-            dtype=dtype,
-            copy=copy,
-            name=name,
-        )
-        if freq is not _NoValue:
-            kwargs["freq"] = freq
-
-        return cast(DatetimeIndex, ps.from_pandas(pd.DatetimeIndex(**kwargs)))
-
-    def __getattr__(self, item: str) -> Any:
-        if hasattr(MissingPandasLikeDatetimeIndex, item):
-            property_or_func = getattr(MissingPandasLikeDatetimeIndex, item)
-            if isinstance(property_or_func, property):
-                return property_or_func.fget(self)
-            else:
-                return partial(property_or_func, self)
-        raise AttributeError("'DatetimeIndex' object has no attribute '{}'".format(item))
+    def __init__(self, series: "ps.Series"):
+        if not isinstance(series.spark.data_type, (DateType, TimestampType, TimestampNTZType)):
+            raise ValueError(
+                "Cannot call DatetimeMethods on type {}".format(series.spark.data_type)
+            )
+        self._data = series
 
     # Properties
     @property
-    def year(self) -> Index:
+    def date(self) -> "ps.Series":
+        """
+        Returns a Series of python datetime.date objects (namely, the date
+        part of Timestamps without timezone information).
+        """
+        # TODO: Hit a weird exception
+        # syntax error in attribute name: `to_date(`start_date`)` with alias
+        return self._data.spark.transform(F.to_date)
+
+    @property
+    def time(self) -> "ps.Series":
+        raise NotImplementedError()
+
+    @property
+    def timetz(self) -> "ps.Series":
+        raise NotImplementedError()
+
+    @property
+    def year(self) -> "ps.Series":
         """
         The year of the datetime.
         """
-        return Index(self.to_series().dt.year)
+        return self._data.spark.transform(lambda c: F.year(c).cast(LongType()))
 
     @property
-    def month(self) -> Index:
+    def month(self) -> "ps.Series":
         """
         The month of the timestamp as January = 1 December = 12.
         """
-        return Index(self.to_series().dt.month)
+        return self._data.spark.transform(lambda c: F.month(c).cast(LongType()))
 
     @property
-    def day(self) -> Index:
+    def day(self) -> "ps.Series":
         """
         The days of the datetime.
         """
-        return Index(self.to_series().dt.day)
+        return self._data.spark.transform(lambda c: F.dayofmonth(c).cast(LongType()))
 
     @property
-    def hour(self) -> Index:
+    def hour(self) -> "ps.Series":
         """
         The hours of the datetime.
         """
-        return Index(self.to_series().dt.hour)
+        return self._data.spark.transform(lambda c: F.hour(c).cast(LongType()))
 
     @property
-    def minute(self) -> Index:
+    def minute(self) -> "ps.Series":
         """
         The minutes of the datetime.
         """
-        return Index(self.to_series().dt.minute)
+        return self._data.spark.transform(lambda c: F.minute(c).cast(LongType()))
 
     @property
-    def second(self) -> Index:
+    def second(self) -> "ps.Series":
         """
         The seconds of the datetime.
         """
-        return Index(self.to_series().dt.second)
+        return self._data.spark.transform(lambda c: F.second(c).cast(LongType()))
 
     @property
-    def microsecond(self) -> Index:
+    def microsecond(self) -> "ps.Series":
         """
         The microseconds of the datetime.
         """
-        return Index(self.to_series().dt.microsecond)
+
+        def pandas_microsecond(s) -> ps.Series[np.int64]:  # type: ignore[no-untyped-def]
+            return s.dt.microsecond
+
+        return self._data.pandas_on_spark.transform_batch(pandas_microsecond)
 
     @property
-    def week(self) -> Index:
+    def nanosecond(self) -> "ps.Series":
+        raise NotImplementedError()
+
+    # TODO(SPARK-42617): Support isocalendar.week and replace it.
+    # See also https://github.com/pandas-dev/pandas/pull/33595.
+    @property
+    def week(self) -> "ps.Series":
         """
         The week ordinal of the year.
+
+        .. deprecated:: 3.4.0
         """
-        return Index(self.to_series().dt.week)
+        warnings.warn(
+            "weekofyear and week have been deprecated.",
+            FutureWarning,
+        )
+        return self._data.spark.transform(lambda c: F.weekofyear(c).cast(LongType()))
 
     @property
-    def weekofyear(self) -> Index:
-        return Index(self.to_series().dt.weekofyear)
+    def weekofyear(self) -> "ps.Series":
+        return self.week
 
     weekofyear.__doc__ = week.__doc__
 
     @property
-    def dayofweek(self) -> Index:
+    def dayofweek(self) -> "ps.Series":
         """
         The day of the week with Monday=0, Sunday=6.
+
         Return the day of the week. It is assumed the week starts on
         Monday, which is denoted by 0 and ends on Sunday which is denoted
         by 6. This method is available on both Series with datetime
-        values (using the `dt` accessor) or DatetimeIndex.
+        values (using the `dt` accessor).
 
         Returns
         -------
-        Series or Index
+        Series
             Containing integers indicating the day number.
 
         See Also
@@ -228,53 +160,62 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range('2016-12-31', '2017-01-08', freq='D')
-        >>> idx.dayofweek
-        Int64Index([5, 6, 0, 1, 2, 3, 4, 5, 6], dtype='int64')
+        >>> s = ps.from_pandas(pd.date_range('2016-12-31', '2017-01-08', freq='D').to_series())
+        >>> s.dt.dayofweek
+        2016-12-31    5
+        2017-01-01    6
+        2017-01-02    0
+        2017-01-03    1
+        2017-01-04    2
+        2017-01-05    3
+        2017-01-06    4
+        2017-01-07    5
+        2017-01-08    6
+        dtype: int64
         """
-        return Index(self.to_series().dt.dayofweek)
+
+        def pandas_dayofweek(s) -> ps.Series[np.int64]:  # type: ignore[no-untyped-def]
+            return s.dt.dayofweek
+
+        return self._data.pandas_on_spark.transform_batch(pandas_dayofweek)
 
     @property
-    def day_of_week(self) -> Index:
+    def weekday(self) -> "ps.Series":
         return self.dayofweek
-
-    day_of_week.__doc__ = dayofweek.__doc__
-
-    @property
-    def weekday(self) -> Index:
-        return Index(self.to_series().dt.weekday)
 
     weekday.__doc__ = dayofweek.__doc__
 
     @property
-    def dayofyear(self) -> Index:
+    def dayofyear(self) -> "ps.Series":
         """
         The ordinal day of the year.
         """
-        return Index(self.to_series().dt.dayofyear)
+
+        def pandas_dayofyear(s) -> ps.Series[np.int64]:  # type: ignore[no-untyped-def]
+            return s.dt.dayofyear
+
+        return self._data.pandas_on_spark.transform_batch(pandas_dayofyear)
 
     @property
-    def day_of_year(self) -> Index:
-        return self.dayofyear
-
-    day_of_year.__doc__ = dayofyear.__doc__
-
-    @property
-    def quarter(self) -> Index:
+    def quarter(self) -> "ps.Series":
         """
         The quarter of the date.
         """
-        return Index(self.to_series().dt.quarter)
+
+        def pandas_quarter(s) -> ps.Series[np.int64]:  # type: ignore[no-untyped-def]
+            return s.dt.quarter
+
+        return self._data.pandas_on_spark.transform_batch(pandas_quarter)
 
     @property
-    def is_month_start(self) -> Index:
+    def is_month_start(self) -> "ps.Series":
         """
         Indicates whether the date is the first day of the month.
 
         Returns
         -------
-        Index
-            Returns a Index with boolean values
+        Series
+            For Series, returns a Series with boolean values.
 
         See Also
         --------
@@ -283,21 +224,37 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range("2018-02-27", periods=3)
-        >>> idx.is_month_start  # doctest: +SKIP
-        Index([False, False, True], dtype='bool')
+        This method is available on Series with datetime values under
+        the ``.dt`` accessor.
+
+        >>> s = ps.Series(pd.date_range("2018-02-27", periods=3))
+        >>> s
+        0   2018-02-27
+        1   2018-02-28
+        2   2018-03-01
+        dtype: datetime64[ns]
+
+        >>> s.dt.is_month_start
+        0    False
+        1    False
+        2     True
+        dtype: bool
         """
-        return Index(self.to_series().dt.is_month_start)
+
+        def pandas_is_month_start(s) -> ps.Series[bool]:  # type: ignore[no-untyped-def]
+            return s.dt.is_month_start
+
+        return self._data.pandas_on_spark.transform_batch(pandas_is_month_start)
 
     @property
-    def is_month_end(self) -> Index:
+    def is_month_end(self) -> "ps.Series":
         """
         Indicates whether the date is the last day of the month.
 
         Returns
         -------
-        Index
-            Returns an Index with boolean values.
+        Series
+            For Series, returns a Series with boolean values.
 
         See Also
         --------
@@ -306,21 +263,38 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range("2018-02-27", periods=3)
-        >>> idx.is_month_end  # doctest: +SKIP
-        Index([False, True, False], dtype='bool')
+        This method is available on Series with datetime values under
+        the ``.dt`` accessor.
+
+        >>> s = ps.Series(pd.date_range("2018-02-27", periods=3))
+        >>> s
+        0   2018-02-27
+        1   2018-02-28
+        2   2018-03-01
+        dtype: datetime64[ns]
+
+        >>> s.dt.is_month_end
+        0    False
+        1     True
+        2    False
+        dtype: bool
         """
-        return Index(self.to_series().dt.is_month_end)
+
+        def pandas_is_month_end(s) -> ps.Series[bool]:  # type: ignore[no-untyped-def]
+            return s.dt.is_month_end
+
+        return self._data.pandas_on_spark.transform_batch(pandas_is_month_end)
 
     @property
-    def is_quarter_start(self) -> Index:
+    def is_quarter_start(self) -> "ps.Series":
         """
         Indicator for whether the date is the first day of a quarter.
 
         Returns
         -------
-        is_quarter_start : Index
-            Returns an Index with boolean values.
+        is_quarter_start : Series
+            The same type as the original data with boolean values. Series will
+            have the same name and index.
 
         See Also
         --------
@@ -329,21 +303,48 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range('2017-03-30', periods=4)
-        >>> idx.is_quarter_start  # doctest: +SKIP
-        Index([False, False, True, False], dtype='bool')
+        This method is available on Series with datetime values under
+        the ``.dt`` accessor.
+
+        >>> df = ps.DataFrame({'dates': pd.date_range("2017-03-30",
+        ...                   periods=4)})
+        >>> df
+               dates
+        0 2017-03-30
+        1 2017-03-31
+        2 2017-04-01
+        3 2017-04-02
+
+        >>> df.dates.dt.quarter
+        0    1
+        1    1
+        2    2
+        3    2
+        Name: dates, dtype: int64
+
+        >>> df.dates.dt.is_quarter_start
+        0    False
+        1    False
+        2     True
+        3    False
+        Name: dates, dtype: bool
         """
-        return Index(self.to_series().dt.is_quarter_start)
+
+        def pandas_is_quarter_start(s) -> ps.Series[bool]:  # type: ignore[no-untyped-def]
+            return s.dt.is_quarter_start
+
+        return self._data.pandas_on_spark.transform_batch(pandas_is_quarter_start)
 
     @property
-    def is_quarter_end(self) -> Index:
+    def is_quarter_end(self) -> "ps.Series":
         """
         Indicator for whether the date is the last day of a quarter.
 
         Returns
         -------
-        is_quarter_end : Index
-            Returns an Index with boolean values.
+        is_quarter_end : Series
+            The same type as the original data with boolean values. Series will
+            have the same name and index.
 
         See Also
         --------
@@ -352,21 +353,48 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range('2017-03-30', periods=4)
-        >>> idx.is_quarter_end  # doctest: +SKIP
-        Index([False, True, False, False], dtype='bool')
+        This method is available on Series with datetime values under
+        the ``.dt`` accessor.
+
+        >>> df = ps.DataFrame({'dates': pd.date_range("2017-03-30",
+        ...                   periods=4)})
+        >>> df
+               dates
+        0 2017-03-30
+        1 2017-03-31
+        2 2017-04-01
+        3 2017-04-02
+
+        >>> df.dates.dt.quarter
+        0    1
+        1    1
+        2    2
+        3    2
+        Name: dates, dtype: int64
+
+        >>> df.dates.dt.is_quarter_start
+        0    False
+        1    False
+        2     True
+        3    False
+        Name: dates, dtype: bool
         """
-        return Index(self.to_series().dt.is_quarter_end)
+
+        def pandas_is_quarter_end(s) -> ps.Series[bool]:  # type: ignore[no-untyped-def]
+            return s.dt.is_quarter_end
+
+        return self._data.pandas_on_spark.transform_batch(pandas_is_quarter_end)
 
     @property
-    def is_year_start(self) -> Index:
+    def is_year_start(self) -> "ps.Series":
         """
         Indicate whether the date is the first day of a year.
 
         Returns
         -------
-        Index
-            Returns an Index with boolean values.
+        Series
+            The same type as the original data with boolean values. Series will
+            have the same name and index.
 
         See Also
         --------
@@ -374,21 +402,38 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range("2017-12-30", periods=3)
-        >>> idx.is_year_start  # doctest: +SKIP
-        Index([False, False, True], dtype='bool')
+        This method is available on Series with datetime values under
+        the ``.dt`` accessor.
+
+        >>> dates = ps.Series(pd.date_range("2017-12-30", periods=3))
+        >>> dates
+        0   2017-12-30
+        1   2017-12-31
+        2   2018-01-01
+        dtype: datetime64[ns]
+
+        >>> dates.dt.is_year_start
+        0    False
+        1    False
+        2     True
+        dtype: bool
         """
-        return Index(self.to_series().dt.is_year_start)
+
+        def pandas_is_year_start(s) -> ps.Series[bool]:  # type: ignore[no-untyped-def]
+            return s.dt.is_year_start
+
+        return self._data.pandas_on_spark.transform_batch(pandas_is_year_start)
 
     @property
-    def is_year_end(self) -> Index:
+    def is_year_end(self) -> "ps.Series":
         """
         Indicate whether the date is the last day of the year.
 
         Returns
         -------
-        Index
-            Returns an Index with boolean values.
+        Series
+            The same type as the original data with boolean values. Series will
+            have the same name and index.
 
         See Also
         --------
@@ -396,14 +441,30 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range("2017-12-30", periods=3)
-        >>> idx.is_year_end  # doctest: +SKIP
-        Index([False, True, False], dtype='bool')
+        This method is available on Series with datetime values under
+        the ``.dt`` accessor.
+
+        >>> dates = ps.Series(pd.date_range("2017-12-30", periods=3))
+        >>> dates
+        0   2017-12-30
+        1   2017-12-31
+        2   2018-01-01
+        dtype: datetime64[ns]
+
+        >>> dates.dt.is_year_end
+        0    False
+        1     True
+        2    False
+        dtype: bool
         """
-        return Index(self.to_series().dt.is_year_end)
+
+        def pandas_is_year_end(s) -> ps.Series[bool]:  # type: ignore[no-untyped-def]
+            return s.dt.is_year_end
+
+        return self._data.pandas_on_spark.transform_batch(pandas_is_year_end)
 
     @property
-    def is_leap_year(self) -> Index:
+    def is_leap_year(self) -> "ps.Series":
         """
         Boolean indicator if the date belongs to a leap year.
 
@@ -414,168 +475,69 @@ class DatetimeIndex(Index):
 
         Returns
         -------
-        Index
+        Series
              Booleans indicating if dates belong to a leap year.
 
         Examples
         --------
-        >>> idx = ps.date_range("2012-01-01", "2015-01-01", freq="Y")
-        >>> idx.is_leap_year  # doctest: +SKIP
-        Index([True, False, False], dtype='bool')
+        This method is available on Series with datetime values under
+        the ``.dt`` accessor.
+
+        >>> dates_series = ps.Series(pd.date_range("2012-01-01", "2015-01-01", freq="Y"))
+        >>> dates_series
+        0   2012-12-31
+        1   2013-12-31
+        2   2014-12-31
+        dtype: datetime64[ns]
+
+        >>> dates_series.dt.is_leap_year
+        0     True
+        1    False
+        2    False
+        dtype: bool
         """
-        return Index(self.to_series().dt.is_leap_year)
+
+        def pandas_is_leap_year(s) -> ps.Series[bool]:  # type: ignore[no-untyped-def]
+            return s.dt.is_leap_year
+
+        return self._data.pandas_on_spark.transform_batch(pandas_is_leap_year)
 
     @property
-    def daysinmonth(self) -> Index:
+    def daysinmonth(self) -> "ps.Series":
         """
         The number of days in the month.
         """
-        return Index(self.to_series().dt.daysinmonth)
+
+        def pandas_daysinmonth(s) -> ps.Series[np.int64]:  # type: ignore[no-untyped-def]
+            return s.dt.daysinmonth
+
+        return self._data.pandas_on_spark.transform_batch(pandas_daysinmonth)
 
     @property
-    def days_in_month(self) -> Index:
-        return Index(self.to_series().dt.days_in_month)
+    def days_in_month(self) -> "ps.Series":
+        return self.daysinmonth
 
     days_in_month.__doc__ = daysinmonth.__doc__
 
     # Methods
-    def ceil(self, freq: Union[str, DateOffset], *args: Any, **kwargs: Any) -> "DatetimeIndex":
+
+    @no_type_check
+    def tz_localize(self, tz) -> "ps.Series":
         """
-        Perform ceil operation on the data to the specified freq.
-
-        Parameters
-        ----------
-        freq : str or Offset
-            The frequency level to ceil the index to. Must be a fixed
-            frequency like 'S' (second) not 'ME' (month end).
-
-        Returns
-        -------
-        DatetimeIndex
-
-        Raises
-        ------
-        ValueError if the `freq` cannot be converted.
-
-        Examples
-        --------
-        >>> rng = ps.date_range('1/1/2018 11:59:00', periods=3, freq='min')
-        >>> rng.ceil('H')  # doctest: +NORMALIZE_WHITESPACE
-        DatetimeIndex(['2018-01-01 12:00:00', '2018-01-01 12:00:00',
-                       '2018-01-01 13:00:00'],
-                      dtype='datetime64[ns]', freq=None)
+        Localize tz-naive Datetime column to tz-aware Datetime column.
         """
-        disallow_nanoseconds(freq)
+        # Neither tz-naive or tz-aware datetime exists in Spark
+        raise NotImplementedError()
 
-        return DatetimeIndex(self.to_series().dt.ceil(freq, *args, **kwargs))
-
-    def floor(self, freq: Union[str, DateOffset], *args: Any, **kwargs: Any) -> "DatetimeIndex":
+    @no_type_check
+    def tz_convert(self, tz) -> "ps.Series":
         """
-        Perform floor operation on the data to the specified freq.
-
-        Parameters
-        ----------
-        freq : str or Offset
-            The frequency level to floor the index to. Must be a fixed
-            frequency like 'S' (second) not 'ME' (month end).
-
-        Returns
-        -------
-        DatetimeIndex
-
-        Raises
-        ------
-        ValueError if the `freq` cannot be converted.
-
-        Examples
-        --------
-        >>> rng = ps.date_range('1/1/2018 11:59:00', periods=3, freq='min')
-        >>> rng.floor("H")  # doctest: +NORMALIZE_WHITESPACE
-        DatetimeIndex(['2018-01-01 11:00:00', '2018-01-01 12:00:00',
-                       '2018-01-01 12:00:00'],
-                      dtype='datetime64[ns]', freq=None)
+        Convert tz-aware Datetime column from one time zone to another.
         """
-        disallow_nanoseconds(freq)
+        # tz-aware datetime doesn't exist in Spark
+        raise NotImplementedError()
 
-        return DatetimeIndex(self.to_series().dt.floor(freq, *args, **kwargs))
-
-    def round(self, freq: Union[str, DateOffset], *args: Any, **kwargs: Any) -> "DatetimeIndex":
-        """
-        Perform round operation on the data to the specified freq.
-
-        Parameters
-        ----------
-        freq : str or Offset
-            The frequency level to round the index to. Must be a fixed
-            frequency like 'S' (second) not 'ME' (month end).
-
-        Returns
-        -------
-        DatetimeIndex
-
-        Raises
-        ------
-        ValueError if the `freq` cannot be converted.
-
-        Examples
-        --------
-        >>> rng = ps.date_range('1/1/2018 11:59:00', periods=3, freq='min')
-        >>> rng.round("H")  # doctest: +NORMALIZE_WHITESPACE
-        DatetimeIndex(['2018-01-01 12:00:00', '2018-01-01 12:00:00',
-                       '2018-01-01 12:00:00'],
-                      dtype='datetime64[ns]', freq=None)
-        """
-        disallow_nanoseconds(freq)
-
-        return DatetimeIndex(self.to_series().dt.round(freq, *args, **kwargs))
-
-    def month_name(self, locale: Optional[str] = None) -> Index:
-        """
-        Return the month names of the DatetimeIndex with specified locale.
-
-        Parameters
-        ----------
-        locale : str, optional
-            Locale determining the language in which to return the month name.
-            Default is English locale.
-
-        Returns
-        -------
-        Index
-            Index of month names.
-
-        Examples
-        --------
-        >>> idx = ps.date_range(start='2018-01', freq='M', periods=3)
-        >>> idx.month_name()
-        Index(['January', 'February', 'March'], dtype='object')
-        """
-        return Index(self.to_series().dt.month_name(locale))
-
-    def day_name(self, locale: Optional[str] = None) -> Index:
-        """
-        Return the day names of the series with specified locale.
-
-        Parameters
-        ----------
-        locale : str, optional
-            Locale determining the language in which to return the day name.
-            Default is English locale.
-
-        Returns
-        -------
-        Index
-            Index of day names.
-
-        Examples
-        --------
-        >>> idx = ps.date_range(start='2018-01-01', freq='D', periods=3)
-        >>> idx.day_name()
-        Index(['Monday', 'Tuesday', 'Wednesday'], dtype='object')
-        """
-        return Index(self.to_series().dt.day_name(locale))
-
-    def normalize(self) -> "DatetimeIndex":
+    def normalize(self) -> "ps.Series":
         """
         Convert times to midnight.
 
@@ -584,12 +546,13 @@ class DatetimeIndex(Index):
         Length is unaltered. The time zones are unaffected.
 
         This method is available on Series with datetime values under
-        the ``.dt`` accessor.
+        the ``.dt`` accessor, and directly on Datetime Array.
 
         Returns
         -------
-        DatetimeIndex
-            The same type as the original data.
+        Series
+            The same type as the original data. Series will have the same
+            name and index.
 
         See Also
         --------
@@ -599,17 +562,24 @@ class DatetimeIndex(Index):
 
         Examples
         --------
-        >>> idx = ps.date_range(start='2014-08-01 10:00', freq='H', periods=3)
-        >>> idx.normalize()
-        DatetimeIndex(['2014-08-01', '2014-08-01', '2014-08-01'], dtype='datetime64[ns]', freq=None)
+        >>> series = ps.Series(pd.Series(pd.date_range('2012-1-1 12:45:31', periods=3, freq='M')))
+        >>> series.dt.normalize()
+        0   2012-01-31
+        1   2012-02-29
+        2   2012-03-31
+        dtype: datetime64[ns]
         """
-        return DatetimeIndex(self.to_series().dt.normalize())
 
-    def strftime(self, date_format: str) -> Index:
+        def pandas_normalize(s) -> ps.Series[np.datetime64]:  # type: ignore[no-untyped-def]
+            return s.dt.normalize()
+
+        return self._data.pandas_on_spark.transform_batch(pandas_normalize)
+
+    def strftime(self, date_format: str) -> "ps.Series":
         """
-        Convert to a string Index using specified date_format.
+        Convert to a string Series using specified date_format.
 
-        Return an Index of formatted strings specified by date_format, which
+        Return an series of formatted strings specified by date_format, which
         supports the same string format as the python standard library. Details
         of the string format can be found in the python string format
         doc.
@@ -621,132 +591,274 @@ class DatetimeIndex(Index):
 
         Returns
         -------
-        Index
-            Index of formatted strings.
+        Series
+            Series of formatted strings.
 
         See Also
         --------
+        to_datetime : Convert the given argument to datetime.
         normalize : Return series with times to midnight.
         round : Round the series to the specified freq.
         floor : Floor the series to the specified freq.
 
         Examples
         --------
-        >>> idx = ps.date_range(pd.Timestamp("2018-03-10 09:00"), periods=3, freq='s')
-        >>> idx.strftime('%B %d, %Y, %r')  # doctest: +NORMALIZE_WHITESPACE
-        Index(['March 10, 2018, 09:00:00 AM', 'March 10, 2018, 09:00:01 AM',
-               'March 10, 2018, 09:00:02 AM'],
-              dtype='object')
-        """
-        return Index(self.to_series().dt.strftime(date_format))
+        >>> series = ps.Series(pd.date_range(pd.Timestamp("2018-03-10 09:00"),
+        ...                                  periods=3, freq='s'))
+        >>> series
+        0   2018-03-10 09:00:00
+        1   2018-03-10 09:00:01
+        2   2018-03-10 09:00:02
+        dtype: datetime64[ns]
 
-    def indexer_between_time(
-        self,
-        start_time: Union[datetime.time, str],
-        end_time: Union[datetime.time, str],
-        include_start: bool = True,
-        include_end: bool = True,
-    ) -> Index:
+        >>> series.dt.strftime('%B %d, %Y, %r')
+        0    March 10, 2018, 09:00:00 AM
+        1    March 10, 2018, 09:00:01 AM
+        2    March 10, 2018, 09:00:02 AM
+        dtype: object
         """
-        Return index locations of values between particular times of day
-        (example: 9:00-9:30AM).
+
+        def pandas_strftime(s) -> ps.Series[str]:  # type: ignore[no-untyped-def]
+            return s.dt.strftime(date_format)
+
+        return self._data.pandas_on_spark.transform_batch(pandas_strftime)
+
+    def round(self, freq: Union[str, DateOffset], *args: Any, **kwargs: Any) -> "ps.Series":
+        """
+        Perform round operation on the data to the specified freq.
 
         Parameters
         ----------
-        start_time, end_time : datetime.time, str
-            Time passed either as object (datetime.time) or as string in
-            appropriate format ("%H:%M", "%H%M", "%I:%M%p", "%I%M%p",
-            "%H:%M:%S", "%H%M%S", "%I:%M:%S%p","%I%M%S%p").
-        include_start : bool, default True
-        include_end : bool, default True
+        freq : str or Offset
+            The frequency level to round the index to. Must be a fixed
+            frequency like 'S' (second) not 'ME' (month end).
+
+        nonexistent : 'shift_forward', 'shift_backward, 'NaT', timedelta, default 'raise'
+            A nonexistent time does not exist in a particular timezone
+            where clocks moved forward due to DST.
+
+            - 'shift_forward' will shift the nonexistent time forward to the
+              closest existing time
+            - 'shift_backward' will shift the nonexistent time backward to the
+              closest existing time
+            - 'NaT' will return NaT where there are nonexistent times
+            - timedelta objects will shift nonexistent times by the timedelta
+            - 'raise' will raise an NonExistentTimeError if there are
+              nonexistent times
+
+            .. note:: this option only works with pandas 0.24.0+
 
         Returns
         -------
-        values_between_time : Index of integers
+        Series
+            a Series with the same index for a Series.
+
+        Raises
+        ------
+        ValueError if the `freq` cannot be converted.
 
         Examples
         --------
-        >>> psidx = ps.date_range("2000-01-01", periods=3, freq="T")
-        >>> psidx  # doctest: +NORMALIZE_WHITESPACE
-        DatetimeIndex(['2000-01-01 00:00:00', '2000-01-01 00:01:00',
-                       '2000-01-01 00:02:00'],
-                      dtype='datetime64[ns]', freq=None)
+        >>> series = ps.Series(pd.date_range('1/1/2018 11:59:00', periods=3, freq='min'))
+        >>> series
+        0   2018-01-01 11:59:00
+        1   2018-01-01 12:00:00
+        2   2018-01-01 12:01:00
+        dtype: datetime64[ns]
 
-        >>> psidx.indexer_between_time("00:01", "00:02").sort_values()
-        Int64Index([1, 2], dtype='int64')
-
-        >>> psidx.indexer_between_time("00:01", "00:02", include_end=False)
-        Int64Index([1], dtype='int64')
-
-        >>> psidx.indexer_between_time("00:01", "00:02", include_start=False)
-        Int64Index([2], dtype='int64')
+        >>> series.dt.round("H")
+        0   2018-01-01 12:00:00
+        1   2018-01-01 12:00:00
+        2   2018-01-01 12:00:00
+        dtype: datetime64[ns]
         """
 
-        def pandas_between_time(pdf) -> ps.DataFrame[int]:  # type: ignore[no-untyped-def]
-            return pdf.between_time(start_time, end_time, include_start, include_end)
+        def pandas_round(s) -> ps.Series[np.datetime64]:  # type: ignore[no-untyped-def]
+            return s.dt.round(freq, *args, **kwargs)
 
-        psdf = self.to_frame()[[]]
-        id_column_name = verify_temp_column_name(psdf, "__id_column__")
-        psdf = psdf.pandas_on_spark.attach_id_column("distributed-sequence", id_column_name)
-        with ps.option_context("compute.default_index_type", "distributed"):
-            # The attached index in the statement below will be dropped soon,
-            # so we enforce “distributed” default index type
-            psdf = psdf.pandas_on_spark.apply_batch(pandas_between_time)
-        return ps.Index(first_series(psdf).rename(self.name))
+        return self._data.pandas_on_spark.transform_batch(pandas_round)
 
-    def indexer_at_time(self, time: Union[datetime.time, str], asof: bool = False) -> Index:
+    def floor(self, freq: Union[str, DateOffset], *args: Any, **kwargs: Any) -> "ps.Series":
         """
-        Return index locations of values at particular time of day
-        (example: 9:30AM).
+        Perform floor operation on the data to the specified freq.
 
         Parameters
         ----------
-        time : datetime.time or str
-            Time passed in either as object (datetime.time) or as string in
-            appropriate format ("%H:%M", "%H%M", "%I:%M%p", "%I%M%p",
-            "%H:%M:%S", "%H%M%S", "%I:%M:%S%p", "%I%M%S%p").
+        freq : str or Offset
+            The frequency level to floor the index to. Must be a fixed
+            frequency like 'S' (second) not 'ME' (month end).
+
+        nonexistent : 'shift_forward', 'shift_backward, 'NaT', timedelta, default 'raise'
+            A nonexistent time does not exist in a particular timezone
+            where clocks moved forward due to DST.
+
+            - 'shift_forward' will shift the nonexistent time forward to the
+              closest existing time
+            - 'shift_backward' will shift the nonexistent time backward to the
+              closest existing time
+            - 'NaT' will return NaT where there are nonexistent times
+            - timedelta objects will shift nonexistent times by the timedelta
+            - 'raise' will raise an NonExistentTimeError if there are
+              nonexistent times
+
+            .. note:: this option only works with pandas 0.24.0+
 
         Returns
         -------
-        values_at_time : Index of integers
+        Series
+            a Series with the same index for a Series.
+
+        Raises
+        ------
+        ValueError if the `freq` cannot be converted.
 
         Examples
         --------
-        >>> psidx = ps.date_range("2000-01-01", periods=3, freq="T")
-        >>> psidx  # doctest: +NORMALIZE_WHITESPACE
-        DatetimeIndex(['2000-01-01 00:00:00', '2000-01-01 00:01:00',
-                       '2000-01-01 00:02:00'],
-                      dtype='datetime64[ns]', freq=None)
+        >>> series = ps.Series(pd.date_range('1/1/2018 11:59:00', periods=3, freq='min'))
+        >>> series
+        0   2018-01-01 11:59:00
+        1   2018-01-01 12:00:00
+        2   2018-01-01 12:01:00
+        dtype: datetime64[ns]
 
-        >>> psidx.indexer_at_time("00:00")
-        Int64Index([0], dtype='int64')
-
-        >>> psidx.indexer_at_time("00:01")
-        Int64Index([1], dtype='int64')
+        >>> series.dt.floor("H")
+        0   2018-01-01 11:00:00
+        1   2018-01-01 12:00:00
+        2   2018-01-01 12:00:00
+        dtype: datetime64[ns]
         """
-        if asof:
-            raise NotImplementedError("'asof' argument is not supported")
 
-        def pandas_at_time(pdf) -> ps.DataFrame[int]:  # type: ignore[no-untyped-def]
-            return pdf.at_time(time, asof)
+        def pandas_floor(s) -> ps.Series[np.datetime64]:  # type: ignore[no-untyped-def]
+            return s.dt.floor(freq, *args, **kwargs)
 
-        psdf = self.to_frame()[[]]
-        id_column_name = verify_temp_column_name(psdf, "__id_column__")
-        psdf = psdf.pandas_on_spark.attach_id_column("distributed-sequence", id_column_name)
-        with ps.option_context("compute.default_index_type", "distributed"):
-            # The attached index in the statement below will be dropped soon,
-            # so we enforce “distributed” default index type
-            psdf = psdf.pandas_on_spark.apply_batch(pandas_at_time)
-        return ps.Index(first_series(psdf).rename(self.name))
+        return self._data.pandas_on_spark.transform_batch(pandas_floor)
 
-    @no_type_check
-    def all(self, *args, **kwargs) -> None:
-        raise TypeError("Cannot perform 'all' with this index type: %s" % type(self).__name__)
+    def ceil(self, freq: Union[str, DateOffset], *args: Any, **kwargs: Any) -> "ps.Series":
+        """
+        Perform ceil operation on the data to the specified freq.
 
+        Parameters
+        ----------
+        freq : str or Offset
+            The frequency level to round the index to. Must be a fixed
+            frequency like 'S' (second) not 'ME' (month end).
 
-def disallow_nanoseconds(freq: Union[str, DateOffset]) -> None:
-    if freq in ["N", "ns"]:
-        raise ValueError("nanoseconds is not supported")
+        nonexistent : 'shift_forward', 'shift_backward, 'NaT', timedelta, default 'raise'
+            A nonexistent time does not exist in a particular timezone
+            where clocks moved forward due to DST.
+
+            - 'shift_forward' will shift the nonexistent time forward to the
+              closest existing time
+            - 'shift_backward' will shift the nonexistent time backward to the
+              closest existing time
+            - 'NaT' will return NaT where there are nonexistent times
+            - timedelta objects will shift nonexistent times by the timedelta
+            - 'raise' will raise an NonExistentTimeError if there are
+              nonexistent times
+
+            .. note:: this option only works with pandas 0.24.0+
+
+        Returns
+        -------
+        Series
+            a Series with the same index for a Series.
+
+        Raises
+        ------
+        ValueError if the `freq` cannot be converted.
+
+        Examples
+        --------
+        >>> series = ps.Series(pd.date_range('1/1/2018 11:59:00', periods=3, freq='min'))
+        >>> series
+        0   2018-01-01 11:59:00
+        1   2018-01-01 12:00:00
+        2   2018-01-01 12:01:00
+        dtype: datetime64[ns]
+
+        >>> series.dt.ceil("H")
+        0   2018-01-01 12:00:00
+        1   2018-01-01 12:00:00
+        2   2018-01-01 13:00:00
+        dtype: datetime64[ns]
+        """
+
+        def pandas_ceil(s) -> ps.Series[np.datetime64]:  # type: ignore[no-untyped-def]
+            return s.dt.ceil(freq, *args, **kwargs)
+
+        return self._data.pandas_on_spark.transform_batch(pandas_ceil)
+
+    def month_name(self, locale: Optional[str] = None) -> "ps.Series":
+        """
+        Return the month names of the series with specified locale.
+
+        Parameters
+        ----------
+        locale : str, optional
+            Locale determining the language in which to return the month name.
+            Default is English locale.
+
+        Returns
+        -------
+        Series
+            Series of month names.
+
+        Examples
+        --------
+        >>> series = ps.Series(pd.date_range(start='2018-01', freq='M', periods=3))
+        >>> series
+        0   2018-01-31
+        1   2018-02-28
+        2   2018-03-31
+        dtype: datetime64[ns]
+
+        >>> series.dt.month_name()
+        0     January
+        1    February
+        2       March
+        dtype: object
+        """
+
+        def pandas_month_name(s) -> ps.Series[str]:  # type: ignore[no-untyped-def]
+            return s.dt.month_name(locale=locale)
+
+        return self._data.pandas_on_spark.transform_batch(pandas_month_name)
+
+    def day_name(self, locale: Optional[str] = None) -> "ps.Series":
+        """
+        Return the day names of the series with specified locale.
+
+        Parameters
+        ----------
+        locale : str, optional
+            Locale determining the language in which to return the day name.
+            Default is English locale.
+
+        Returns
+        -------
+        Series
+            Series of day names.
+
+        Examples
+        --------
+        >>> series = ps.Series(pd.date_range(start='2018-01-01', freq='D', periods=3))
+        >>> series
+        0   2018-01-01
+        1   2018-01-02
+        2   2018-01-03
+        dtype: datetime64[ns]
+
+        >>> series.dt.day_name()
+        0       Monday
+        1      Tuesday
+        2    Wednesday
+        dtype: object
+        """
+
+        def pandas_day_name(s) -> ps.Series[str]:  # type: ignore[no-untyped-def]
+            return s.dt.day_name(locale=locale)
+
+        return self._data.pandas_on_spark.transform_batch(pandas_day_name)
 
 
 def _test() -> None:
@@ -754,19 +866,19 @@ def _test() -> None:
     import doctest
     import sys
     from pyspark.sql import SparkSession
-    import pyspark.pandas.indexes.datetimes
+    import pyspark.pandas.datetimes
 
     os.chdir(os.environ["SPARK_HOME"])
 
-    globs = pyspark.pandas.indexes.datetimes.__dict__.copy()
+    globs = pyspark.pandas.datetimes.__dict__.copy()
     globs["ps"] = pyspark.pandas
     spark = (
         SparkSession.builder.master("local[4]")
-        .appName("pyspark.pandas.indexes.datetimes tests")
+        .appName("pyspark.pandas.datetimes tests")
         .getOrCreate()
     )
     (failure_count, test_count) = doctest.testmod(
-        pyspark.pandas.indexes.datetimes,
+        pyspark.pandas.datetimes,
         globs=globs,
         optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE,
     )
