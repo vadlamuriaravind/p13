@@ -15,66 +15,89 @@
 # limitations under the License.
 #
 
+import os
+import tempfile
 import unittest
 
-from pyspark.ml import Pipeline
-from pyspark.ml.classification import LogisticRegression, OneVsRest
-from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.linalg import Vectors
-from pyspark.ml.util import MetaAlgorithmReadWrite
-from pyspark.testing.mlutils import SparkSessionTestCase
+from pyspark.mllib.common import _to_java_object_rdd
+from pyspark.mllib.util import LinearDataGenerator
+from pyspark.mllib.util import MLUtils
+from pyspark.mllib.linalg import SparseVector, DenseVector, Vectors
+from pyspark.mllib.random import RandomRDDs
+from pyspark.testing.mllibutils import MLlibTestCase
 
 
-class MetaAlgorithmReadWriteTests(SparkSessionTestCase):
-    def test_getAllNestedStages(self):
-        def _check_uid_set_equal(stages, expected_stages):
-            uids = set(map(lambda x: x.uid, stages))
-            expected_uids = set(map(lambda x: x.uid, expected_stages))
-            self.assertEqual(uids, expected_uids)
+class MLUtilsTests(MLlibTestCase):
+    def test_append_bias(self):
+        data = [2.0, 2.0, 2.0]
+        ret = MLUtils.appendBias(data)
+        self.assertEqual(ret[3], 1.0)
+        self.assertEqual(type(ret), DenseVector)
 
-        df1 = self.spark.createDataFrame(
-            [
-                (Vectors.dense([1.0, 2.0]), 1.0),
-                (Vectors.dense([-1.0, -2.0]), 0.0),
-            ],
-            ["features", "label"],
-        )
-        df2 = self.spark.createDataFrame(
-            [
-                (1.0, 2.0, 1.0),
-                (1.0, 2.0, 0.0),
-            ],
-            ["a", "b", "label"],
-        )
-        vs = VectorAssembler(inputCols=["a", "b"], outputCol="features")
-        lr = LogisticRegression()
-        pipeline = Pipeline(stages=[vs, lr])
-        pipelineModel = pipeline.fit(df2)
-        ova = OneVsRest(classifier=lr)
-        ovaModel = ova.fit(df1)
+    def test_append_bias_with_vector(self):
+        data = Vectors.dense([2.0, 2.0, 2.0])
+        ret = MLUtils.appendBias(data)
+        self.assertEqual(ret[3], 1.0)
+        self.assertEqual(type(ret), DenseVector)
 
-        ova_pipeline = Pipeline(stages=[vs, ova])
-        nested_pipeline = Pipeline(stages=[ova_pipeline])
+    def test_append_bias_with_sp_vector(self):
+        data = Vectors.sparse(3, {0: 2.0, 2: 2.0})
+        expected = Vectors.sparse(4, {0: 2.0, 2: 2.0, 3: 1.0})
+        # Returned value must be SparseVector
+        ret = MLUtils.appendBias(data)
+        self.assertEqual(ret, expected)
+        self.assertEqual(type(ret), SparseVector)
 
-        _check_uid_set_equal(
-            MetaAlgorithmReadWrite.getAllNestedStages(pipeline), [pipeline, vs, lr]
+    def test_load_vectors(self):
+        import shutil
+
+        data = [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]
+        temp_dir = tempfile.mkdtemp()
+        load_vectors_path = os.path.join(temp_dir, "test_load_vectors")
+        try:
+            self.sc.parallelize(data).saveAsTextFile(load_vectors_path)
+            ret_rdd = MLUtils.loadVectors(self.sc, load_vectors_path)
+            ret = ret_rdd.collect()
+            self.assertEqual(len(ret), 2)
+            self.assertEqual(ret[0], DenseVector([1.0, 2.0, 3.0]))
+            self.assertEqual(ret[1], DenseVector([1.0, 2.0, 3.0]))
+        except BaseException:
+            self.fail()
+        finally:
+            shutil.rmtree(load_vectors_path)
+
+
+class LinearDataGeneratorTests(MLlibTestCase):
+    def test_dim(self):
+        linear_data = LinearDataGenerator.generateLinearInput(
+            intercept=0.0,
+            weights=[0.0, 0.0, 0.0],
+            xMean=[0.0, 0.0, 0.0],
+            xVariance=[0.33, 0.33, 0.33],
+            nPoints=4,
+            seed=0,
+            eps=0.1,
         )
-        _check_uid_set_equal(
-            MetaAlgorithmReadWrite.getAllNestedStages(pipelineModel),
-            [pipelineModel] + pipelineModel.stages,
-        )
-        _check_uid_set_equal(MetaAlgorithmReadWrite.getAllNestedStages(ova), [ova, lr])
-        _check_uid_set_equal(
-            MetaAlgorithmReadWrite.getAllNestedStages(ovaModel), [ovaModel, lr] + ovaModel.models
-        )
-        _check_uid_set_equal(
-            MetaAlgorithmReadWrite.getAllNestedStages(nested_pipeline),
-            [nested_pipeline, ova_pipeline, vs, ova, lr],
-        )
+        self.assertEqual(len(linear_data), 4)
+        for point in linear_data:
+            self.assertEqual(len(point.features), 3)
+
+        linear_data = LinearDataGenerator.generateLinearRDD(
+            sc=self.sc, nexamples=6, nfeatures=2, eps=0.1, nParts=2, intercept=0.0
+        ).collect()
+        self.assertEqual(len(linear_data), 6)
+        for point in linear_data:
+            self.assertEqual(len(point.features), 2)
+
+
+class SerDeTest(MLlibTestCase):
+    def test_to_java_object_rdd(self):  # SPARK-6660
+        data = RandomRDDs.uniformRDD(self.sc, 10, 5, seed=0)
+        self.assertEqual(_to_java_object_rdd(data).count(), 10)
 
 
 if __name__ == "__main__":
-    from pyspark.ml.tests.test_util import *  # noqa: F401
+    from pyspark.mllib.tests.test_util import *  # noqa: F401
 
     try:
         import xmlrunner
